@@ -61,7 +61,7 @@ end
  * @param redis - An ioredis client instance
  * @param keyPrefix - Optional prefix for all keys (default: "dmutex:")
  */
-export const makeRedisBackingLayer = (
+export const layer = (
   redis: Redis,
   keyPrefix = "dmutex:"
 ): Layer.Layer<DistributedMutexBacking> => {
@@ -155,7 +155,7 @@ export const makeRedisBackingLayer = (
  * Create a Redis backing from a connection URL.
  * This creates and manages the Redis connection lifecycle.
  */
-export const makeRedisBackingLayerFromUrl = (
+export const layerFromUrl = (
   url: string,
   keyPrefix = "dmutex:"
 ): Layer.Layer<DistributedMutexBacking, BackingError> =>

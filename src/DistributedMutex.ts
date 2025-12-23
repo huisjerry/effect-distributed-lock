@@ -1,5 +1,10 @@
 import { Context, Duration, Effect, Option, Schedule, Scope } from "effect";
-import { AcquireTimeoutError, BackingError, LockLostError } from "./Errors.ts";
+import {
+  AcquireTimeoutError,
+  BackingError,
+  LockLostError,
+  NotYetAcquiredError,
+} from "./Errors.ts";
 
 // =============================================================================
 // Backing Service
@@ -236,17 +241,13 @@ export const make = (
         Effect.gen(function* () {
           const maybeAcquired = yield* tryAcquire;
           if (Option.isNone(maybeAcquired)) {
-            return yield* Effect.fail({ _tag: "NotYetAcquired" as const });
+            return yield* new NotYetAcquiredError();
           }
         }),
         schedule
       ).pipe(
-        Effect.catchIf(
-          (e): e is { _tag: "NotYetAcquired" } =>
-            typeof e === "object" &&
-            e !== null &&
-            "_tag" in e &&
-            e._tag === "NotYetAcquired",
+        Effect.catchTag(
+          "NotYetAcquiredError",
           () =>
             new AcquireTimeoutError({
               key,

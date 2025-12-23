@@ -6,16 +6,13 @@
  */
 import { Effect, Console, Duration } from "effect";
 import Redis from "ioredis";
-import {
-  DistributedMutex,
-  makeRedisBackingLayer,
-} from "./src/index.ts";
+import { DistributedMutex, RedisBacking } from "../src/index.ts";
 
 // Create Redis client
 const redis = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379");
 
 // Create the Redis backing layer
-const RedisLayer = makeRedisBackingLayer(redis, "example:");
+const RedisLayer = RedisBacking.layer(redis, "example:");
 
 // Example 1: Using withLock for a critical section
 const example1 = Effect.gen(function* () {
@@ -90,4 +87,3 @@ const main = Effect.gen(function* () {
 );
 
 Effect.runPromise(main).catch(console.error);
-

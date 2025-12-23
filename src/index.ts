@@ -39,9 +39,6 @@
 // Core module (namespace with types and functions)
 export * as DistributedMutex from "./DistributedMutex.ts";
 
-// Re-export the backing tag for convenience
-export { DistributedMutexBacking } from "./DistributedMutex.ts";
-
 // Errors
 export {
   AcquireTimeoutError,
@@ -51,7 +48,4 @@ export {
 } from "./Errors.ts";
 
 // Redis backing
-export {
-  makeRedisBackingLayer,
-  makeRedisBackingLayerFromUrl,
-} from "./RedisBacking.ts";
+export * as RedisBacking from "./RedisBacking.ts";

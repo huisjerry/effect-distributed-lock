@@ -46,3 +46,11 @@ export class BackingError extends Data.TaggedError("BackingError")<{
     return `Backing store error during "${this.operation}": ${this.cause}`;
   }
 }
+
+/**
+ * Internal error: lock not yet acquired (used for retry logic)
+ * @internal
+ */
+export class NotYetAcquiredError extends Data.TaggedError(
+  "NotYetAcquiredError"
+)<{}> {}
