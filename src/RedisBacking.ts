@@ -1,7 +1,6 @@
 import { Duration, Effect, Layer, Option } from "effect";
 import { Redis } from "ioredis";
-import { DistributedMutexBacking } from "./DistributedMutex.js";
-import { MutexBackingError } from "./Errors.js";
+import { DistributedLockBacking, LockBackingError } from "./Backing.js";
 
 /**
  * Lua script for atomic lock acquisition.
@@ -56,22 +55,22 @@ end
 `;
 
 /**
- * Create a Redis-backed distributed mutex backing layer.
+ * Create a Redis-backed distributed lock backing layer.
  *
  * @param redis - An ioredis client instance
- * @param keyPrefix - Optional prefix for all keys (default: "dmutex:")
+ * @param keyPrefix - Optional prefix for all keys (default: "dlock:")
  */
 export const layer = (
   redis: Redis,
-  keyPrefix = "dmutex:"
-): Layer.Layer<DistributedMutexBacking> => {
+  keyPrefix = "dlock:"
+): Layer.Layer<DistributedLockBacking> => {
   const prefixKey = (key: string) => `${keyPrefix}${key}`;
 
   const tryAcquire = (
     key: string,
     holderId: string,
     ttl: Duration.Duration
-  ): Effect.Effect<boolean, MutexBackingError> =>
+  ): Effect.Effect<boolean, LockBackingError> =>
     Effect.tryPromise({
       try: async () => {
         const result = await redis.eval(
@@ -84,13 +83,13 @@ export const layer = (
         return result === 1;
       },
       catch: (cause) =>
-        new MutexBackingError({ operation: "tryAcquire", cause }),
+        new LockBackingError({ operation: "tryAcquire", cause }),
     });
 
   const release = (
     key: string,
     holderId: string
-  ): Effect.Effect<boolean, MutexBackingError> =>
+  ): Effect.Effect<boolean, LockBackingError> =>
     Effect.tryPromise({
       try: async () => {
         const result = await redis.eval(
@@ -101,14 +100,14 @@ export const layer = (
         );
         return result === 1;
       },
-      catch: (cause) => new MutexBackingError({ operation: "release", cause }),
+      catch: (cause) => new LockBackingError({ operation: "release", cause }),
     });
 
   const refresh = (
     key: string,
     holderId: string,
     ttl: Duration.Duration
-  ): Effect.Effect<boolean, MutexBackingError> =>
+  ): Effect.Effect<boolean, LockBackingError> =>
     Effect.tryPromise({
       try: async () => {
         const result = await redis.eval(
@@ -120,31 +119,30 @@ export const layer = (
         );
         return result === 1;
       },
-      catch: (cause) => new MutexBackingError({ operation: "refresh", cause }),
+      catch: (cause) => new LockBackingError({ operation: "refresh", cause }),
     });
 
-  const isLocked = (key: string): Effect.Effect<boolean, MutexBackingError> =>
+  const isLocked = (key: string): Effect.Effect<boolean, LockBackingError> =>
     Effect.tryPromise({
       try: async () => {
         const exists = await redis.exists(prefixKey(key));
         return exists === 1;
       },
-      catch: (cause) => new MutexBackingError({ operation: "isLocked", cause }),
+      catch: (cause) => new LockBackingError({ operation: "isLocked", cause }),
     });
 
   const getHolder = (
     key: string
-  ): Effect.Effect<Option.Option<string>, MutexBackingError> =>
+  ): Effect.Effect<Option.Option<string>, LockBackingError> =>
     Effect.tryPromise({
       try: async () => {
         const holder = await redis.get(prefixKey(key));
         return holder ? Option.some(holder) : Option.none();
       },
-      catch: (cause) =>
-        new MutexBackingError({ operation: "getHolder", cause }),
+      catch: (cause) => new LockBackingError({ operation: "getHolder", cause }),
     });
 
-  return Layer.succeed(DistributedMutexBacking, {
+  return Layer.succeed(DistributedLockBacking, {
     tryAcquire,
     release,
     refresh,

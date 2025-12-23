@@ -1,7 +1,7 @@
 /**
  * Effect Distributed Lock
  *
- * A distributed mutex library for Effect with pluggable backends.
+ * A distributed lock library for Effect with pluggable backends.
  *
  * @example
  * ```ts
@@ -36,10 +36,15 @@
  * @module
  */
 
+// Backing interface
+export * as Backing from "./Backing.js";
+export { DistributedLockBacking, LockBackingError } from "./Backing.js";
+
 // Core module (namespace with types and functions)
 export * as DistributedMutex from "./DistributedMutex.js";
+
 // Errors
-export { MutexBackingError, LockLostError } from "./Errors.js";
+export { LockLostError } from "./Errors.js";
 
 // Redis backing
 export * as RedisBacking from "./RedisBacking.js";

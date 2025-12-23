@@ -12,18 +12,6 @@ export class LockLostError extends Data.TaggedError("LockLostError")<{
 }
 
 /**
- * Error from the backing store (Redis, etc.)
- */
-export class MutexBackingError extends Data.TaggedError("MutexBackingError")<{
-  readonly operation: string;
-  readonly cause: unknown;
-}> {
-  get message() {
-    return `Backing store error during "${this.operation}": ${this.cause}`;
-  }
-}
-
-/**
  * Internal error: lock not yet acquired (used for retry logic)
  * @internal
  */

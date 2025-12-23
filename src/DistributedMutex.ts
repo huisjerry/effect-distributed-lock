@@ -1,73 +1,6 @@
-import {
-  Context,
-  Duration,
-  Effect,
-  Fiber,
-  Option,
-  Schedule,
-  Scope,
-} from "effect";
-import {
-  MutexBackingError,
-  LockLostError,
-  NotYetAcquiredError,
-} from "./Errors.js";
-
-// =============================================================================
-// Backing Service
-// =============================================================================
-
-/**
- * Low-level backing store interface for distributed mutex operations.
- * Implementations handle the actual storage (Redis, etcd, DynamoDB, etc.)
- */
-export interface DistributedMutexBacking {
-  /**
-   * Try to acquire the lock. Returns true if acquired, false if already held.
-   * Must set TTL on the lock.
-   */
-  readonly tryAcquire: (
-    key: string,
-    holderId: string,
-    ttl: Duration.Duration
-  ) => Effect.Effect<boolean, MutexBackingError>;
-
-  /**
-   * Release the lock. Only succeeds if we are the current holder.
-   * Returns true if released, false if we weren't the holder.
-   */
-  readonly release: (
-    key: string,
-    holderId: string
-  ) => Effect.Effect<boolean, MutexBackingError>;
-
-  /**
-   * Refresh the TTL on a lock we hold.
-   * Returns true if refreshed, false if lock was lost.
-   */
-  readonly refresh: (
-    key: string,
-    holderId: string,
-    ttl: Duration.Duration
-  ) => Effect.Effect<boolean, MutexBackingError>;
-
-  /**
-   * Check if the lock is currently held (by anyone).
-   */
-  readonly isLocked: (key: string) => Effect.Effect<boolean, MutexBackingError>;
-
-  /**
-   * Get the current holder ID, if any.
-   */
-  readonly getHolder: (
-    key: string
-  ) => Effect.Effect<Option.Option<string>, MutexBackingError>;
-}
-
-export const DistributedMutexBacking =
-  Context.GenericTag<DistributedMutexBacking>(
-    "@effect-distributed-lock/DistributedMutexBacking"
-  );
+import { Duration, Effect, Fiber, Option, Schedule, Scope } from "effect";
+import { DistributedLockBacking, LockBackingError } from "./Backing.js";
+import { LockLostError, NotYetAcquiredError } from "./Errors.js";
 
 // =============================================================================
 // Mutex Configuration
@@ -129,7 +62,7 @@ export interface DistributedMutex {
    */
   readonly withLock: <A, E, R>(
     effect: Effect.Effect<A, E, R>
-  ) => Effect.Effect<A, E | LockLostError | MutexBackingError, R>;
+  ) => Effect.Effect<A, E | LockLostError | LockBackingError, R>;
 
   /**
    * Try to acquire the lock immediately without waiting.
@@ -138,11 +71,7 @@ export interface DistributedMutex {
    */
   readonly withLockIfAvailable: <A, E, R>(
     effect: Effect.Effect<A, E, R>
-  ) => Effect.Effect<
-    Option.Option<A>,
-    E | LockLostError | MutexBackingError,
-    R
-  >;
+  ) => Effect.Effect<Option.Option<A>, E | LockLostError | LockBackingError, R>;
 
   /**
    * Acquire the lock, waiting if necessary.
@@ -153,8 +82,8 @@ export interface DistributedMutex {
    * When the scope closes, the fiber is interrupted and the lock is released.
    */
   readonly acquire: Effect.Effect<
-    Fiber.Fiber<void, LockLostError | MutexBackingError>,
-    LockLostError | MutexBackingError,
+    Fiber.Fiber<void, LockLostError | LockBackingError>,
+    LockLostError | LockBackingError,
     Scope.Scope
   >;
 
@@ -167,15 +96,15 @@ export interface DistributedMutex {
    * When the scope closes, the fiber is interrupted and the lock is released.
    */
   readonly tryAcquire: Effect.Effect<
-    Option.Option<Fiber.Fiber<void, LockLostError | MutexBackingError>>,
-    LockLostError | MutexBackingError,
+    Option.Option<Fiber.Fiber<void, LockLostError | LockBackingError>>,
+    LockLostError | LockBackingError,
     Scope.Scope
   >;
 
   /**
    * Check if the lock is currently held.
    */
-  readonly isLocked: Effect.Effect<boolean, MutexBackingError>;
+  readonly isLocked: Effect.Effect<boolean, LockBackingError>;
 }
 
 // =============================================================================
@@ -217,9 +146,9 @@ function fullyResolveConfig(
 export const make = (
   key: string,
   config: DistributedMutexConfig = {}
-): Effect.Effect<DistributedMutex, never, DistributedMutexBacking> =>
+): Effect.Effect<DistributedMutex, never, DistributedLockBacking> =>
   Effect.gen(function* () {
-    const backing = yield* DistributedMutexBacking;
+    const backing = yield* DistributedLockBacking;
 
     // Generate unique holder ID for this instance
     const holderId = crypto.randomUUID();
@@ -232,12 +161,12 @@ export const make = (
       backingFailureRetryPolicy,
     } = fullyResolveConfig(config);
 
-    const withMutexBackingErrorRetry = <A, E extends { _tag: string }, R>(
-      effect: Effect.Effect<A, E | MutexBackingError, R>
+    const withLockBackingErrorRetry = <A, E extends { _tag: string }, R>(
+      effect: Effect.Effect<A, E | LockBackingError, R>
     ) =>
       effect.pipe(
         Effect.retry({
-          while: (e) => e._tag === "MutexBackingError",
+          while: (e) => e._tag === "LockBackingError",
           schedule: backingFailureRetryPolicy,
         })
       );
@@ -248,7 +177,7 @@ export const make = (
       Effect.gen(function* () {
         const refreshed = yield* backing
           .refresh(key, holderId, ttl)
-          .pipe(withMutexBackingErrorRetry);
+          .pipe(withLockBackingErrorRetry);
 
         if (!refreshed) {
           return yield* new LockLostError({ key });
@@ -259,13 +188,13 @@ export const make = (
 
     // Try to acquire immediately, returns Option
     const tryAcquire: Effect.Effect<
-      Option.Option<Fiber.Fiber<void, LockLostError | MutexBackingError>>,
-      MutexBackingError,
+      Option.Option<Fiber.Fiber<void, LockLostError | LockBackingError>>,
+      LockBackingError,
       Scope.Scope
     > = Effect.gen(function* () {
       const acquired = yield* backing
         .tryAcquire(key, holderId, ttl)
-        .pipe(withMutexBackingErrorRetry);
+        .pipe(withLockBackingErrorRetry);
       if (!acquired) {
         return Option.none();
       }
@@ -277,7 +206,7 @@ export const make = (
       yield* Effect.addFinalizer(() =>
         backing
           .release(key, holderId)
-          .pipe(withMutexBackingErrorRetry, Effect.ignore)
+          .pipe(withLockBackingErrorRetry, Effect.ignore)
       );
 
       return Option.some(keepAliveFiber);
@@ -285,8 +214,8 @@ export const make = (
 
     // Acquire with retry/timeout, returns void when acquired
     const acquire: Effect.Effect<
-      Fiber.Fiber<void, LockLostError | MutexBackingError>,
-      MutexBackingError,
+      Fiber.Fiber<void, LockLostError | LockBackingError>,
+      LockBackingError,
       Scope.Scope
     > =
       // Retry until we acquire the lock
@@ -312,7 +241,7 @@ export const make = (
     // Convenience: acquire lock, run effect, release when done
     const withLock = <A, E, R>(
       effect: Effect.Effect<A, E, R>
-    ): Effect.Effect<A, E | LockLostError | MutexBackingError, R> =>
+    ): Effect.Effect<A, E | LockLostError | LockBackingError, R> =>
       Effect.scoped(
         Effect.gen(function* () {
           const keepAliveFiber = yield* acquire;
@@ -326,7 +255,7 @@ export const make = (
       effect: Effect.Effect<A, E, R>
     ): Effect.Effect<
       Option.Option<A>,
-      E | LockLostError | MutexBackingError,
+      E | LockLostError | LockBackingError,
       R
     > =>
       Effect.scoped(
@@ -341,9 +270,9 @@ export const make = (
         })
       );
 
-    const isLocked: Effect.Effect<boolean, MutexBackingError> = backing
+    const isLocked: Effect.Effect<boolean, LockBackingError> = backing
       .isLocked(key)
-      .pipe(withMutexBackingErrorRetry);
+      .pipe(withLockBackingErrorRetry);
 
     return {
       key,
