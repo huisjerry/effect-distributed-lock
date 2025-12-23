@@ -1,5 +1,5 @@
 import { Effect, Layer, Option } from "effect";
-import type { Redis } from "ioredis";
+import { Redis } from "ioredis";
 import { DistributedMutexBacking } from "./DistributedMutex.js";
 import { BackingError } from "./Errors.js";
 
@@ -162,16 +162,6 @@ export const layerFromUrl = (
   Layer.scoped(
     DistributedMutexBacking,
     Effect.gen(function* () {
-      // Dynamic import to avoid requiring ioredis at module load time
-      const { default: Redis } = yield* Effect.tryPromise({
-        try: () => import("ioredis"),
-        catch: (cause) =>
-          new BackingError({
-            operation: "import",
-            cause: `Failed to import ioredis: ${cause}`,
-          }),
-      });
-
       const redis = new Redis(url);
 
       // Ensure cleanup on scope close

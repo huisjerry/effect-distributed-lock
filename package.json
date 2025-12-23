@@ -1,7 +1,16 @@
 {
   "name": "effect-distributed-lock",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "A distributed mutex library for Effect with pluggable backends",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ethanniser/effect-distributed-lock.git"
+  },
+  "homepage": "https://github.com/ethanniser/effect-distributed-lock",
+  "bugs": {
+    "url": "https://github.com/ethanniser/effect-distributed-lock/issues"
+  },
   "type": "module",
   "scripts": {
     "build": "tsc",
