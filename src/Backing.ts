@@ -1,4 +1,4 @@
-import { Context, Data, Duration, Effect, Option } from "effect";
+import { Context, Data, Duration, Effect } from "effect";
 
 // =============================================================================
 // Errors
@@ -7,7 +7,9 @@ import { Context, Data, Duration, Effect, Option } from "effect";
 /**
  * Error from the backing store (Redis, etc.)
  */
-export class LockBackingError extends Data.TaggedError("LockBackingError")<{
+export class SemaphoreBackingError extends Data.TaggedError(
+  "SemaphoreBackingError"
+)<{
   readonly operation: string;
   readonly cause: unknown;
 }> {
@@ -21,53 +23,65 @@ export class LockBackingError extends Data.TaggedError("LockBackingError")<{
 // =============================================================================
 
 /**
- * Low-level backing store interface for distributed lock operations.
- * Implementations handle the actual storage (Redis, etcd, DynamoDB, etc.)
+ * Low-level backing store interface for distributed semaphore operations.
+ * Implementations handle the actual storage (Redis, etc.)
+ *
+ * The semaphore uses a sorted set model where:
+ * - Each permit holder is stored with their acquisition timestamp as the score
+ * - Expired entries are cleaned up automatically
+ * - Multiple permits can be acquired atomically
  */
-export interface DistributedLockBacking {
+export interface DistributedSemaphoreBacking {
   /**
-   * Try to acquire the lock. Returns true if acquired, false if already held.
-   * Must set TTL on the lock.
+   * Try to acquire `permits` from a semaphore with the given `limit`.
+   * Returns true if acquired, false if not enough permits available.
+   *
+   * The implementation should:
+   * 1. Clean up expired entries (based on TTL)
+   * 2. Check if there's room: currentCount + permits <= limit
+   * 3. If so, add the permits with current timestamp
    */
   readonly tryAcquire: (
     key: string,
     holderId: string,
-    ttl: Duration.Duration
-  ) => Effect.Effect<boolean, LockBackingError>;
+    ttl: Duration.Duration,
+    limit: number,
+    permits: number
+  ) => Effect.Effect<boolean, SemaphoreBackingError>;
 
   /**
-   * Release the lock. Only succeeds if we are the current holder.
-   * Returns true if released, false if we weren't the holder.
+   * Release `permits` held by this holder.
+   * Returns the number of permits actually released.
    */
   readonly release: (
     key: string,
-    holderId: string
-  ) => Effect.Effect<boolean, LockBackingError>;
+    holderId: string,
+    permits: number
+  ) => Effect.Effect<number, SemaphoreBackingError>;
 
   /**
-   * Refresh the TTL on a lock we hold.
-   * Returns true if refreshed, false if lock was lost.
+   * Refresh the TTL on permits we hold.
+   * Returns true if refreshed, false if permits were lost.
    */
   readonly refresh: (
     key: string,
     holderId: string,
+    ttl: Duration.Duration,
+    limit: number,
+    permits: number
+  ) => Effect.Effect<boolean, SemaphoreBackingError>;
+
+  /**
+   * Get the number of permits currently held (in use).
+   * Available permits = limit - getCount().
+   */
+  readonly getCount: (
+    key: string,
     ttl: Duration.Duration
-  ) => Effect.Effect<boolean, LockBackingError>;
-
-  /**
-   * Check if the lock is currently held (by anyone).
-   */
-  readonly isLocked: (key: string) => Effect.Effect<boolean, LockBackingError>;
-
-  /**
-   * Get the current holder ID, if any.
-   */
-  readonly getHolder: (
-    key: string
-  ) => Effect.Effect<Option.Option<string>, LockBackingError>;
+  ) => Effect.Effect<number, SemaphoreBackingError>;
 }
 
-export const DistributedLockBacking =
-  Context.GenericTag<DistributedLockBacking>(
-    "@effect-distributed-lock/DistributedLockBacking"
+export const DistributedSemaphoreBacking =
+  Context.GenericTag<DistributedSemaphoreBacking>(
+    "@effect-distributed-lock/DistributedSemaphoreBacking"
   );

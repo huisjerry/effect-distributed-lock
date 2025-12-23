@@ -1,0 +1,384 @@
+import {
+  Deferred,
+  Duration,
+  Effect,
+  Fiber,
+  Option,
+  Schedule,
+  Scope,
+} from "effect";
+import {
+  DistributedSemaphoreBacking,
+  SemaphoreBackingError,
+} from "./Backing.js";
+import { LockLostError, NotYetAcquiredError } from "./Errors.js";
+
+// =============================================================================
+// Semaphore Configuration
+// =============================================================================
+
+export interface DistributedSemaphoreConfig {
+  /**
+   * Maximum number of permits available.
+   * This is the total capacity of the semaphore.
+   * @default 1 (mutex behavior)
+   */
+  readonly limit?: number;
+
+  /**
+   * TTL for held permits. If the holder crashes, permits auto-release after this.
+   * @default 30 seconds
+   */
+  readonly ttl?: Duration.DurationInput;
+
+  /**
+   * How often to refresh the TTL while holding permits.
+   * Should be less than TTL to avoid losing the permits.
+   * @default 1/3 of TTL
+   */
+  readonly refreshInterval?: Duration.DurationInput;
+
+  /**
+   * How often to poll when waiting to acquire permits.
+   * @default 100ms
+   */
+  readonly acquireRetryInterval?: Duration.DurationInput;
+
+  /**
+   * Retry policy when a backing failure occurs.
+   * This could happen when:
+   * - Trying to acquire permits
+   * - Refreshing the TTL
+   * - Releasing permits
+   */
+  readonly backingFailureRetryPolicy?: Schedule.Schedule<void>;
+}
+
+const DEFAULT_LIMIT = 1;
+const DEFAULT_TTL = Duration.seconds(30);
+const DEFAULT_ACQUIRE_RETRY_INTERVAL = Duration.millis(100);
+const DEFAULT_FAILURE_RETRY_POLICY = Schedule.spaced(
+  DEFAULT_ACQUIRE_RETRY_INTERVAL
+).pipe(Schedule.asVoid);
+
+// =============================================================================
+// Distributed Semaphore Interface
+// =============================================================================
+
+/**
+ * A distributed semaphore that can be used across multiple processes/services.
+ *
+ * Similar to Effect's built-in Semaphore, but distributed across processes
+ * using a backing store like Redis.
+ *
+ * A semaphore manages a pool of permits. Tasks can acquire one or more permits,
+ * and must release them when done. If not enough permits are available, tasks
+ * wait until permits are released.
+ *
+ * @example
+ * ```ts
+ * // Create a semaphore that allows 5 concurrent operations
+ * const sem = yield* DistributedSemaphore.make("my-resource", { limit: 5 });
+ *
+ * // Acquire 2 permits, run effect, then release
+ * yield* sem.withPermits(2)(myEffect);
+ *
+ * // Create a mutex (limit=1) for exclusive access
+ * const mutex = yield* DistributedSemaphore.make("my-lock", { limit: 1 });
+ * yield* mutex.withPermits(1)(criticalSection);
+ * ```
+ */
+export interface DistributedSemaphore {
+  /**
+   * The key identifying this semaphore in the backing store.
+   */
+  readonly key: string;
+
+  /**
+   * The maximum number of permits available.
+   */
+  readonly limit: number;
+
+  /**
+   * Run an effect with the specified number of permits.
+   * Acquires the permits, runs the effect, then releases.
+   * If not enough permits are available, waits until they are.
+   *
+   * The permit TTL is refreshed automatically while the effect runs.
+   */
+  readonly withPermits: (
+    permits: number
+  ) => <A, E, R>(
+    effect: Effect.Effect<A, E, R>
+  ) => Effect.Effect<A, E | LockLostError | SemaphoreBackingError, R>;
+
+  /**
+   * Run an effect only if the specified permits are immediately available.
+   * Returns Some(result) if permits were acquired and effect ran,
+   * None if permits were not available.
+   */
+  readonly withPermitsIfAvailable: (
+    permits: number
+  ) => <A, E, R>(
+    effect: Effect.Effect<A, E, R>
+  ) => Effect.Effect<
+    Option.Option<A>,
+    E | LockLostError | SemaphoreBackingError,
+    R
+  >;
+
+  /**
+   * Acquire the specified number of permits, waiting if necessary.
+   * The permits are held until the scope is closed.
+   * The permit TTL is refreshed automatically while held.
+   *
+   * @returns The fiber that refreshes the permit hold. Its lifetime is tied to the scope.
+   * When the scope closes, the fiber is interrupted and permits are released.
+   */
+  readonly take: (
+    permits: number
+  ) => Effect.Effect<
+    Fiber.Fiber<never, LockLostError | SemaphoreBackingError>,
+    LockLostError | SemaphoreBackingError,
+    Scope.Scope
+  >;
+
+  /**
+   * Try to acquire permits immediately without waiting.
+   * Returns Some(fiber) if acquired (permits held until scope closes),
+   * None if permits were not available.
+   *
+   * @returns The fiber that refreshes the permit hold. Its lifetime is tied to the scope.
+   * When the scope closes, the fiber is interrupted and permits are released.
+   */
+  readonly tryTake: (
+    permits: number
+  ) => Effect.Effect<
+    Option.Option<Fiber.Fiber<never, LockLostError | SemaphoreBackingError>>,
+    LockLostError | SemaphoreBackingError,
+    Scope.Scope
+  >;
+
+  /**
+   * Get the current number of active permits (for debugging/introspection).
+   * Note: This is eventually consistent due to TTL-based expiration.
+   */
+  readonly currentCount: Effect.Effect<number, SemaphoreBackingError>;
+}
+
+// =============================================================================
+// Factory
+// =============================================================================
+
+type FullyResolvedConfig = {
+  limit: number;
+  ttl: Duration.Duration;
+  refreshInterval: Duration.Duration;
+  acquireRetryInterval: Duration.Duration;
+  backingFailureRetryPolicy: Schedule.Schedule<void>;
+};
+
+function fullyResolveConfig(
+  config: DistributedSemaphoreConfig
+): FullyResolvedConfig {
+  const limit = config.limit ?? DEFAULT_LIMIT;
+  const ttl = config.ttl ? Duration.decode(config.ttl) : DEFAULT_TTL;
+  const refreshInterval = config.refreshInterval
+    ? Duration.decode(config.refreshInterval)
+    : Duration.millis(Duration.toMillis(ttl) / 3);
+  const acquireRetryInterval = config.acquireRetryInterval
+    ? Duration.decode(config.acquireRetryInterval)
+    : DEFAULT_ACQUIRE_RETRY_INTERVAL;
+  const backingFailureRetryPolicy = config.backingFailureRetryPolicy
+    ? config.backingFailureRetryPolicy
+    : DEFAULT_FAILURE_RETRY_POLICY;
+
+  return {
+    limit,
+    ttl,
+    refreshInterval,
+    acquireRetryInterval,
+    backingFailureRetryPolicy,
+  };
+}
+
+/**
+ * Create a distributed semaphore for the given key.
+ *
+ * @param key - Unique identifier for this semaphore in the backing store
+ * @param config - Configuration options
+ *
+ * @example
+ * ```ts
+ * // Create a semaphore that allows 5 concurrent operations
+ * const sem = yield* DistributedSemaphore.make("my-resource", { limit: 5 });
+ *
+ * // Use withPermits to run an effect with acquired permits
+ * yield* sem.withPermits(2)(Effect.log("I have 2 permits"));
+ *
+ * // Use withPermitsIfAvailable to try without waiting
+ * const result = yield* sem.withPermitsIfAvailable(1)(Effect.succeed(42));
+ * // result: Option<number>
+ * ```
+ */
+export const make = (
+  key: string,
+  config: DistributedSemaphoreConfig = {}
+): Effect.Effect<DistributedSemaphore, never, DistributedSemaphoreBacking> =>
+  Effect.gen(function* () {
+    const backing = yield* DistributedSemaphoreBacking;
+
+    // Generate unique holder ID for this instance
+    const holderId = crypto.randomUUID();
+
+    // Resolve config with defaults
+    const {
+      limit,
+      ttl,
+      refreshInterval,
+      acquireRetryInterval,
+      backingFailureRetryPolicy,
+    } = fullyResolveConfig(config);
+
+    const withBackingErrorRetry = <A, E extends { _tag: string }, R>(
+      effect: Effect.Effect<A, E | SemaphoreBackingError, R>
+    ) =>
+      effect.pipe(
+        Effect.retry({
+          while: (e) => e._tag === "SemaphoreBackingError",
+          schedule: backingFailureRetryPolicy,
+        })
+      );
+
+    // Keep the permits alive by refreshing TTL periodically.
+    // This effect runs forever until interrupted (when scope closes).
+    const keepAlive = (
+      permits: number
+    ): Effect.Effect<never, SemaphoreBackingError | LockLostError, never> =>
+      Effect.repeat(
+        Effect.gen(function* () {
+          const refreshed = yield* backing
+            .refresh(key, holderId, ttl, limit, permits)
+            .pipe(withBackingErrorRetry);
+
+          if (!refreshed) {
+            return yield* new LockLostError({ key });
+          }
+        }),
+        Schedule.spaced(refreshInterval)
+      ).pipe(
+        Effect.andThen(
+          Effect.dieMessage(
+            "Invariant violated: `keepAlive` should never return a value"
+          )
+        )
+      );
+
+    // Try to acquire permits immediately, returns Option
+    const tryTake = (
+      permits: number
+    ): Effect.Effect<
+      Option.Option<Fiber.Fiber<never, LockLostError | SemaphoreBackingError>>,
+      SemaphoreBackingError,
+      Scope.Scope
+    > =>
+      Effect.gen(function* () {
+        const acquired = yield* backing
+          .tryAcquire(key, holderId, ttl, limit, permits)
+          .pipe(withBackingErrorRetry);
+        if (!acquired) {
+          return Option.none();
+        }
+
+        // Start keepalive fiber, tied to this scope
+        const keepAliveFiber = yield* Effect.forkScoped(keepAlive(permits));
+
+        // Add finalizer to release permits when scope closes
+        yield* Effect.addFinalizer(() =>
+          backing
+            .release(key, holderId, permits)
+            .pipe(withBackingErrorRetry, Effect.ignore)
+        );
+
+        return Option.some(keepAliveFiber);
+      });
+
+    // Acquire permits with retry, returns fiber when acquired
+    const take = (
+      permits: number
+    ): Effect.Effect<
+      Fiber.Fiber<never, LockLostError | SemaphoreBackingError>,
+      SemaphoreBackingError,
+      Scope.Scope
+    > =>
+      Effect.gen(function* () {
+        const maybeAcquired = yield* tryTake(permits);
+        if (Option.isNone(maybeAcquired)) {
+          return yield* new NotYetAcquiredError();
+        }
+        return maybeAcquired.value;
+      }).pipe(
+        Effect.retry({
+          while: (e) => e._tag === "NotYetAcquiredError",
+          schedule: Schedule.spaced(acquireRetryInterval),
+        }),
+        Effect.catchTag("NotYetAcquiredError", () =>
+          Effect.dieMessage(
+            "Invariant violated: `take` should never return `NotYetAcquiredError` " +
+              "since it should be caught by the retry which should retry forever until permits are acquired"
+          )
+        )
+      );
+
+    // Convenience: acquire permits, run effect, release when done
+    const withPermits =
+      (permits: number) =>
+      <A, E, R>(
+        effect: Effect.Effect<A, E, R>
+      ): Effect.Effect<A, E | LockLostError | SemaphoreBackingError, R> =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const keepAliveFiber = yield* take(permits);
+
+            return yield* Effect.raceFirst(effect, Fiber.join(keepAliveFiber));
+          })
+        );
+
+    // Convenience: try to acquire permits, run effect if successful
+    const withPermitsIfAvailable =
+      (permits: number) =>
+      <A, E, R>(
+        effect: Effect.Effect<A, E, R>
+      ): Effect.Effect<
+        Option.Option<A>,
+        E | LockLostError | SemaphoreBackingError,
+        R
+      > =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const maybeAcquired = yield* tryTake(permits);
+            if (Option.isNone(maybeAcquired)) {
+              return Option.none();
+            }
+            const keepAliveFiber = maybeAcquired.value;
+            return yield* Effect.raceFirst(
+              effect.pipe(Effect.asSome),
+              Fiber.join(keepAliveFiber)
+            );
+          })
+        );
+
+    const currentCount: Effect.Effect<number, SemaphoreBackingError> = backing
+      .getCount(key, ttl)
+      .pipe(withBackingErrorRetry);
+
+    return {
+      key,
+      limit,
+      withPermits,
+      withPermitsIfAvailable,
+      take,
+      tryTake,
+      currentCount,
+    } satisfies DistributedSemaphore;
+  });

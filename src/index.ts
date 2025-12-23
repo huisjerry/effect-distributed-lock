@@ -1,30 +1,38 @@
 /**
- * Effect Distributed Lock
+ * Effect Distributed Semaphore
  *
- * A distributed lock library for Effect with pluggable backends.
+ * A distributed semaphore library for Effect with pluggable backends.
+ * Implements a multi-semaphore that can be used to implement:
+ * - Mutex (limit=1, permits=1)
+ * - Semaphore (limit=N, permits=1)
+ * - Multi-semaphore (limit=N, permits=M)
  *
  * @example
  * ```ts
- * import { DistributedMutex, RedisBacking } from "effect-distributed-lock";
+ * import { DistributedSemaphore, RedisBacking } from "effect-distributed-lock";
  * import { Effect } from "effect";
  * import Redis from "ioredis";
  *
  * const redis = new Redis(process.env.REDIS_URL);
  *
  * const program = Effect.gen(function* () {
- *   // Create a mutex for a specific resource
- *   const mutex = yield* DistributedMutex.make("my-resource-lock", {
+ *   // Create a semaphore that allows 5 concurrent operations
+ *   const sem = yield* DistributedSemaphore.make("my-resource", {
+ *     limit: 5,
  *     ttl: "30 seconds",
- *     acquireTimeout: "10 seconds",
  *   });
  *
- *   // Use the lock
- *   yield* mutex.withLock(
+ *   // Acquire 2 permits, run effect, release when done
+ *   yield* sem.withPermits(2)(
  *     Effect.gen(function* () {
- *       // Critical section - only one process can be here at a time
- *       yield* doSomethingExclusive();
+ *       // Only 2 of the 5 slots are used
+ *       yield* doSomethingLimited();
  *     })
  *   );
+ *
+ *   // For mutex behavior, use limit=1 and withPermits(1)
+ *   const mutex = yield* DistributedSemaphore.make("my-lock", { limit: 1 });
+ *   yield* mutex.withPermits(1)(criticalSection);
  * });
  *
  * program.pipe(
@@ -38,10 +46,13 @@
 
 // Backing interface
 export * as Backing from "./Backing.js";
-export { DistributedLockBacking, LockBackingError } from "./Backing.js";
+export {
+  DistributedSemaphoreBacking,
+  SemaphoreBackingError,
+} from "./Backing.js";
 
 // Core module (namespace with types and functions)
-export * as DistributedMutex from "./DistributedMutex.js";
+export * as DistributedSemaphore from "./DistributedSemaphore.js";
 
 // Errors
 export { LockLostError } from "./Errors.js";
