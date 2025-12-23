@@ -5,7 +5,7 @@
  *
  * @example
  * ```ts
- * import { DistributedMutex, makeRedisBackingLayer } from "effect-distributed-lock";
+ * import { DistributedMutex, RedisBacking } from "effect-distributed-lock";
  * import { Effect } from "effect";
  * import Redis from "ioredis";
  *
@@ -28,7 +28,7 @@
  * });
  *
  * program.pipe(
- *   Effect.provide(makeRedisBackingLayer(redis)),
+ *   Effect.provide(RedisBacking.layer(redis)),
  *   Effect.runPromise
  * );
  * ```
