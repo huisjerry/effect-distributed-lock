@@ -1,5 +1,7 @@
 # effect-distributed-lock
 
+*WARNING: This is still in active development, likely has bugs and is subject to change.*
+
 A distributed mutex library for [Effect](https://effect.website/) with pluggable backends.
 
 ## Features
@@ -7,7 +9,7 @@ A distributed mutex library for [Effect](https://effect.website/) with pluggable
 - **Scope-based resource management** — locks are automatically released when the scope closes
 - **Automatic TTL refresh** — keeps locks alive while held, prevents deadlocks if holder crashes
 - **Pluggable backends** — ships with Redis, easy to implement others (etcd, DynamoDB, etc.)
-- **Configurable retry & timeout** — control polling interval, acquire timeout, and TTL
+- **Configurable retry policies** — control polling interval, TTL, and backing failure retry behavior
 - **Type-safe errors** — tagged errors for precise error handling
 
 ## Installation
@@ -33,17 +35,14 @@ const RedisLayer = RedisBacking.layer(redis);
 
 const program = Effect.gen(function* () {
   const mutex = yield* DistributedMutex.make("my-resource", {
-    ttl: "30 seconds",
-    acquireTimeout: "10 seconds",
+    ttl: "10 seconds",
+    refreshInterval: "3 seconds",
+    acquireRetryInterval: "500 millis",
+    backingFailureRetryPolicy: Schedule.exponential("100 millis")),
   });
 
   // Lock is held while effect runs, released automatically after
-  yield* mutex.withLock(
-    Effect.gen(function* () {
-      // Critical section - only one process can be here at a time
-      yield* doExclusiveWork();
-    })
-  );
+  yield* mutex.withLock(doExclusiveWork);
 });
 
 program.pipe(Effect.provide(RedisLayer), Effect.runPromise);
@@ -57,18 +56,18 @@ program.pipe(Effect.provide(RedisLayer), Effect.runPromise);
 const mutex = yield* DistributedMutex.make(key, config);
 ```
 
-| Config Option     | Type             | Default      | Description                                      |
-| ----------------- | ---------------- | ------------ | ------------------------------------------------ |
-| `ttl`             | `DurationInput`  | `30 seconds` | Lock TTL (auto-releases if holder crashes)       |
-| `refreshInterval` | `DurationInput`  | `ttl / 3`    | How often to refresh TTL while holding           |
-| `retryInterval`   | `DurationInput`  | `100ms`      | Polling interval when waiting to acquire         |
-| `acquireTimeout`  | `DurationInput`  | `∞`          | Max time to wait for lock (fails if exceeded)    |
+| Config Option          | Type               | Default      | Description                                         |
+| ---------------------- | ------------------ | ------------ | --------------------------------------------------- |
+| `ttl`                  | `DurationInput`    | `30 seconds` | Lock TTL (auto-releases if holder crashes)          |
+| `refreshInterval`      | `DurationInput`    | `ttl / 3`    | How often to refresh TTL while holding              |
+| `acquireRetryInterval` | `DurationInput`    | `100ms`      | Polling interval when waiting to acquire            |
+| `backingFailureRetryPolicy`   | `Schedule<void>`   | `100ms`      | Retry schedule for backing store failures           |
 
 ### Using the Mutex
 
 #### `withLock` — Acquire, run, release
 
-The simplest and recommended way. Acquires the lock, runs your effect, and releases when done:
+The simplest and recommended way. Acquires the lock (waiting indefinitely if needed), runs your effect, and releases when done:
 
 ```typescript
 yield* mutex.withLock(myEffect);
@@ -94,12 +93,14 @@ For advanced use cases where you need explicit control over the lock lifecycle:
 ```typescript
 yield* Effect.scoped(
   Effect.gen(function* () {
-    yield* mutex.acquire; // Lock held until scope closes
-    yield* doWork();
-    // Lock automatically released here
+    const keepAliveFiber = yield* mutex.acquire; // Lock held until scope closes
+    yield* doWork;
+    // Lock automatically released + keepalive fiber interrupted here
   })
 );
 ```
+
+Both `acquire` and `tryAcquire` return the keepalive fiber that refreshes the lock TTL. Errors related to the keep alive (losing the lock or backing store failure) are propagated to the fiber.
 
 #### `isLocked` — Check lock status
 
@@ -113,36 +114,32 @@ All errors are tagged for precise handling with `Effect.catchTag`:
 
 ```typescript
 yield* mutex.withLock(myEffect).pipe(
-  Effect.catchTag("AcquireTimeoutError", (e) =>
-    Effect.log(`Timed out acquiring lock: ${e.key}`)
-  ),
   Effect.catchTag("LockLostError", (e) =>
     Effect.log(`Lock was lost while held: ${e.key}`)
   ),
-  Effect.catchTag("BackingError", (e) =>
+  Effect.catchTag("MutexBackingError", (e) =>
     Effect.log(`Redis error: ${e.message}`)
   )
 );
 ```
 
-| Error                 | Description                                          |
-| --------------------- | ---------------------------------------------------- |
-| `AcquireTimeoutError` | Failed to acquire lock within the timeout period     |
-| `LockLostError`       | Lock TTL expired while we thought we held it         |
-| `BackingError`        | Error from the backing store (Redis connection, etc) |
+| Error               | Description                                          |
+| ------------------- | ---------------------------------------------------- |
+| `LockLostError`     | Lock TTL expired while we thought we held it         |
+| `MutexBackingError` | Error from the backing store (Redis connection, etc) |
 
 ## Custom Backends
 
 Implement the `DistributedMutexBacking` interface to use a different store:
 
 ```typescript
-import { Layer } from "effect";
+import { Duration, Layer } from "effect";
 import { DistributedMutex } from "effect-distributed-lock";
 
 const MyCustomBacking = Layer.succeed(DistributedMutex.DistributedMutexBacking, {
-  tryAcquire: (key, holderId, ttlMs) => /* ... */,
+  tryAcquire: (key, holderId, ttl: Duration.Duration) => /* ... */,
   release: (key, holderId) => /* ... */,
-  refresh: (key, holderId, ttlMs) => /* ... */,
+  refresh: (key, holderId, ttl: Duration.Duration) => /* ... */,
   isLocked: (key) => /* ... */,
   getHolder: (key) => /* ... */,
 });

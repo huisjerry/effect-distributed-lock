@@ -1,7 +1,14 @@
-import { Context, Duration, Effect, Option, Schedule, Scope } from "effect";
 import {
-  AcquireTimeoutError,
-  BackingError,
+  Context,
+  Duration,
+  Effect,
+  Fiber,
+  Option,
+  Schedule,
+  Scope,
+} from "effect";
+import {
+  MutexBackingError,
   LockLostError,
   NotYetAcquiredError,
 } from "./Errors.js";
@@ -22,8 +29,8 @@ export interface DistributedMutexBacking {
   readonly tryAcquire: (
     key: string,
     holderId: string,
-    ttlMs: number
-  ) => Effect.Effect<boolean, BackingError>;
+    ttl: Duration.Duration
+  ) => Effect.Effect<boolean, MutexBackingError>;
 
   /**
    * Release the lock. Only succeeds if we are the current holder.
@@ -32,7 +39,7 @@ export interface DistributedMutexBacking {
   readonly release: (
     key: string,
     holderId: string
-  ) => Effect.Effect<boolean, BackingError>;
+  ) => Effect.Effect<boolean, MutexBackingError>;
 
   /**
    * Refresh the TTL on a lock we hold.
@@ -41,20 +48,20 @@ export interface DistributedMutexBacking {
   readonly refresh: (
     key: string,
     holderId: string,
-    ttlMs: number
-  ) => Effect.Effect<boolean, BackingError>;
+    ttl: Duration.Duration
+  ) => Effect.Effect<boolean, MutexBackingError>;
 
   /**
    * Check if the lock is currently held (by anyone).
    */
-  readonly isLocked: (key: string) => Effect.Effect<boolean, BackingError>;
+  readonly isLocked: (key: string) => Effect.Effect<boolean, MutexBackingError>;
 
   /**
    * Get the current holder ID, if any.
    */
   readonly getHolder: (
     key: string
-  ) => Effect.Effect<Option.Option<string>, BackingError>;
+  ) => Effect.Effect<Option.Option<string>, MutexBackingError>;
 }
 
 export const DistributedMutexBacking =
@@ -84,17 +91,23 @@ export interface DistributedMutexConfig {
    * How often to poll when waiting to acquire the lock.
    * @default 100ms
    */
-  readonly retryInterval?: Duration.DurationInput;
+  readonly acquireRetryInterval?: Duration.DurationInput;
 
   /**
-   * Maximum time to wait when acquiring the lock.
-   * If not set, will wait forever.
+   * How often to retry when a failure occurs.
+   * This could happen when:
+   * - Trying to acquire the lock
+   * - Refreshing the TTL
+   * - Releasing the lock
    */
-  readonly acquireTimeout?: Duration.DurationInput;
+  readonly backingFailureRetryPolicy?: Schedule.Schedule<void>;
 }
 
 const DEFAULT_TTL = Duration.seconds(30);
-const DEFAULT_RETRY_INTERVAL = Duration.millis(100);
+const DEFAULT_ACQUIRE_RETRY_INTERVAL = Duration.millis(100);
+const DEFAULT_FAILURE_RETRY_POLICY = Schedule.spaced(
+  DEFAULT_ACQUIRE_RETRY_INTERVAL
+).pipe(Schedule.asVoid);
 
 // =============================================================================
 // Distributed Mutex Interface
@@ -116,11 +129,7 @@ export interface DistributedMutex {
    */
   readonly withLock: <A, E, R>(
     effect: Effect.Effect<A, E, R>
-  ) => Effect.Effect<
-    A,
-    E | AcquireTimeoutError | LockLostError | BackingError,
-    R
-  >;
+  ) => Effect.Effect<A, E | LockLostError | MutexBackingError, R>;
 
   /**
    * Try to acquire the lock immediately without waiting.
@@ -129,16 +138,23 @@ export interface DistributedMutex {
    */
   readonly withLockIfAvailable: <A, E, R>(
     effect: Effect.Effect<A, E, R>
-  ) => Effect.Effect<Option.Option<A>, E | LockLostError | BackingError, R>;
+  ) => Effect.Effect<
+    Option.Option<A>,
+    E | LockLostError | MutexBackingError,
+    R
+  >;
 
   /**
    * Acquire the lock, waiting if necessary.
    * The lock is held until the scope is closed.
    * The lock TTL is refreshed automatically while held.
+   *
+   * @returns The fiber that refreshes the lock hold. Its lifetime is tied to the scope.
+   * When the scope closes, the fiber is interrupted and the lock is released.
    */
   readonly acquire: Effect.Effect<
-    void,
-    AcquireTimeoutError | LockLostError | BackingError,
+    Fiber.Fiber<void, LockLostError | MutexBackingError>,
+    LockLostError | MutexBackingError,
     Scope.Scope
   >;
 
@@ -146,22 +162,54 @@ export interface DistributedMutex {
    * Try to acquire immediately without waiting.
    * Returns Some(void) if acquired (lock held until scope closes),
    * None if lock was not available.
+   *
+   * @returns The fiber that refreshes the lock hold. Its lifetime is tied to the scope.
+   * When the scope closes, the fiber is interrupted and the lock is released.
    */
   readonly tryAcquire: Effect.Effect<
-    Option.Option<void>,
-    LockLostError | BackingError,
+    Option.Option<Fiber.Fiber<void, LockLostError | MutexBackingError>>,
+    LockLostError | MutexBackingError,
     Scope.Scope
   >;
 
   /**
    * Check if the lock is currently held.
    */
-  readonly isLocked: Effect.Effect<boolean, BackingError>;
+  readonly isLocked: Effect.Effect<boolean, MutexBackingError>;
 }
 
 // =============================================================================
 // Factory
 // =============================================================================
+
+type FullyResolvedConfig = {
+  ttl: Duration.Duration;
+  refreshInterval: Duration.Duration;
+  acquireRetryInterval: Duration.Duration;
+  backingFailureRetryPolicy: Schedule.Schedule<void>;
+};
+
+function fullyResolveConfig(
+  config: DistributedMutexConfig
+): FullyResolvedConfig {
+  const ttl = config.ttl ? Duration.decode(config.ttl) : DEFAULT_TTL;
+  const refreshInterval = config.refreshInterval
+    ? Duration.decode(config.refreshInterval)
+    : Duration.millis(Duration.toMillis(ttl) / 3);
+  const acquireRetryInterval = config.acquireRetryInterval
+    ? Duration.decode(config.acquireRetryInterval)
+    : DEFAULT_ACQUIRE_RETRY_INTERVAL;
+  const backingFailureRetryPolicy = config.backingFailureRetryPolicy
+    ? config.backingFailureRetryPolicy
+    : DEFAULT_FAILURE_RETRY_POLICY;
+
+  return {
+    ttl,
+    refreshInterval,
+    acquireRetryInterval,
+    backingFailureRetryPolicy,
+  };
+}
 
 /**
  * Create a distributed mutex for the given key.
@@ -177,121 +225,125 @@ export const make = (
     const holderId = crypto.randomUUID();
 
     // Resolve config with defaults
-    const ttl = config.ttl ? Duration.decode(config.ttl) : DEFAULT_TTL;
-    const ttlMs = Duration.toMillis(ttl);
-    const refreshInterval = config.refreshInterval
-      ? Duration.decode(config.refreshInterval)
-      : Duration.millis(ttlMs / 3);
-    const retryInterval = config.retryInterval
-      ? Duration.decode(config.retryInterval)
-      : DEFAULT_RETRY_INTERVAL;
-    const acquireTimeout = config.acquireTimeout
-      ? Option.some(Duration.decode(config.acquireTimeout))
-      : Option.none<Duration.Duration>();
+    const {
+      ttl,
+      refreshInterval,
+      acquireRetryInterval,
+      backingFailureRetryPolicy,
+    } = fullyResolveConfig(config);
+
+    const withMutexBackingErrorRetry = <A, E extends { _tag: string }, R>(
+      effect: Effect.Effect<A, E | MutexBackingError, R>
+    ) =>
+      effect.pipe(
+        Effect.retry({
+          while: (e) => e._tag === "MutexBackingError",
+          schedule: backingFailureRetryPolicy,
+        })
+      );
 
     // Keep the lock alive by refreshing TTL periodically.
     // This effect runs forever until interrupted (when scope closes).
     const keepAlive = Effect.repeat(
       Effect.gen(function* () {
-        const refreshed = yield* backing.refresh(key, holderId, ttlMs);
+        const refreshed = yield* backing
+          .refresh(key, holderId, ttl)
+          .pipe(withMutexBackingErrorRetry);
+
         if (!refreshed) {
           return yield* new LockLostError({ key });
         }
       }),
       Schedule.spaced(refreshInterval)
-    );
+    ).pipe(Effect.asVoid);
 
     // Try to acquire immediately, returns Option
     const tryAcquire: Effect.Effect<
-      Option.Option<void>,
-      LockLostError | BackingError,
+      Option.Option<Fiber.Fiber<void, LockLostError | MutexBackingError>>,
+      MutexBackingError,
       Scope.Scope
     > = Effect.gen(function* () {
-      const acquired = yield* backing.tryAcquire(key, holderId, ttlMs);
+      const acquired = yield* backing
+        .tryAcquire(key, holderId, ttl)
+        .pipe(withMutexBackingErrorRetry);
       if (!acquired) {
         return Option.none();
       }
 
       // Start keepalive fiber, tied to this scope
-      yield* Effect.forkScoped(keepAlive);
+      const keepAliveFiber = yield* Effect.forkScoped(keepAlive);
 
       // Add finalizer to release lock when scope closes
       yield* Effect.addFinalizer(() =>
-        backing.release(key, holderId).pipe(Effect.ignore)
+        backing
+          .release(key, holderId)
+          .pipe(withMutexBackingErrorRetry, Effect.ignore)
       );
 
-      return Option.some(undefined as void);
+      return Option.some(keepAliveFiber);
     });
 
     // Acquire with retry/timeout, returns void when acquired
     const acquire: Effect.Effect<
-      void,
-      AcquireTimeoutError | LockLostError | BackingError,
+      Fiber.Fiber<void, LockLostError | MutexBackingError>,
+      MutexBackingError,
       Scope.Scope
-    > = Effect.gen(function* () {
-      // Build retry schedule with optional timeout
-      const schedule = Option.match(acquireTimeout, {
-        onNone: () => Schedule.spaced(retryInterval),
-        onSome: (timeout) =>
-          Schedule.spaced(retryInterval).pipe(Schedule.upTo(timeout)),
-      });
-
+    > =
       // Retry until we acquire the lock
-      yield* Effect.retry(
-        Effect.gen(function* () {
-          const maybeAcquired = yield* tryAcquire;
-          if (Option.isNone(maybeAcquired)) {
-            return yield* new NotYetAcquiredError();
-          }
+      Effect.gen(function* () {
+        const maybeAcquired = yield* tryAcquire;
+        if (Option.isNone(maybeAcquired)) {
+          return yield* new NotYetAcquiredError();
+        }
+        return maybeAcquired.value;
+      }).pipe(
+        Effect.retry({
+          while: (e) => e._tag === "NotYetAcquiredError",
+          schedule: Schedule.spaced(acquireRetryInterval),
         }),
-        schedule
-      ).pipe(
-        Effect.catchTag(
-          "NotYetAcquiredError",
-          () =>
-            new AcquireTimeoutError({
-              key,
-              timeoutMs: Option.match(acquireTimeout, {
-                onNone: () => -1,
-                onSome: Duration.toMillis,
-              }),
-            })
+        Effect.catchTag("NotYetAcquiredError", () =>
+          Effect.dieMessage(
+            "Invariant violated: `acquire` should never return `NotYetAcquiredError " +
+              "since it should be caught by the retry which should retry forever until the lock is acquired"
+          )
         )
       );
-    });
 
     // Convenience: acquire lock, run effect, release when done
     const withLock = <A, E, R>(
       effect: Effect.Effect<A, E, R>
-    ): Effect.Effect<
-      A,
-      E | AcquireTimeoutError | LockLostError | BackingError,
-      R
-    > =>
+    ): Effect.Effect<A, E | LockLostError | MutexBackingError, R> =>
       Effect.scoped(
         Effect.gen(function* () {
-          yield* acquire;
-          return yield* effect;
+          const keepAliveFiber = yield* acquire;
+          const taskFiber = yield* Effect.fork(effect);
+          return yield* Fiber.join(Fiber.zipLeft(taskFiber, keepAliveFiber));
         })
       );
 
     // Convenience: try to acquire, run effect if successful
     const withLockIfAvailable = <A, E, R>(
       effect: Effect.Effect<A, E, R>
-    ): Effect.Effect<Option.Option<A>, E | LockLostError | BackingError, R> =>
+    ): Effect.Effect<
+      Option.Option<A>,
+      E | LockLostError | MutexBackingError,
+      R
+    > =>
       Effect.scoped(
         Effect.gen(function* () {
           const maybeAcquired = yield* tryAcquire;
           if (Option.isNone(maybeAcquired)) {
-            return Option.none<A>();
+            return Option.none();
           }
-          const result = yield* effect;
-          return Option.some(result);
+          const keepAliveFiber = maybeAcquired.value;
+          const taskFiber = yield* Effect.fork(effect.pipe(Effect.asSome));
+          return yield* Fiber.join(Fiber.zipLeft(taskFiber, keepAliveFiber));
         })
       );
 
-    const isLocked: Effect.Effect<boolean, BackingError> =
-      backing.isLocked(key);
+    const isLocked: Effect.Effect<boolean, MutexBackingError> = backing
+      .isLocked(key)
+      .pipe(withMutexBackingErrorRetry);
 
     return {
       key,

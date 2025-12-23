@@ -1,30 +1,6 @@
 import { Data } from "effect";
 
 /**
- * Base error for all distributed mutex errors
- */
-export class DistributedMutexError extends Data.TaggedError(
-  "DistributedMutexError"
-)<{
-  readonly message: string;
-  readonly cause?: unknown;
-}> {}
-
-/**
- * Failed to acquire the lock within the timeout period
- */
-export class AcquireTimeoutError extends Data.TaggedError(
-  "AcquireTimeoutError"
-)<{
-  readonly key: string;
-  readonly timeoutMs: number;
-}> {
-  get message() {
-    return `Failed to acquire lock "${this.key}" within ${this.timeoutMs}ms`;
-  }
-}
-
-/**
  * The lock was lost (TTL expired while we thought we held it)
  */
 export class LockLostError extends Data.TaggedError("LockLostError")<{
@@ -38,7 +14,7 @@ export class LockLostError extends Data.TaggedError("LockLostError")<{
 /**
  * Error from the backing store (Redis, etc.)
  */
-export class BackingError extends Data.TaggedError("BackingError")<{
+export class MutexBackingError extends Data.TaggedError("MutexBackingError")<{
   readonly operation: string;
   readonly cause: unknown;
 }> {
