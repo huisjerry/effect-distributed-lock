@@ -112,6 +112,72 @@ yield* Effect.scoped(
 
 Both `take` and `tryTake` return the keepalive fiber that refreshes the permit TTL. Errors from the keepalive (losing permits or backing store failure) are propagated through the fiber.
 
+### Acquire Options
+
+All acquire methods (`withPermits`, `withPermitsIfAvailable`, `take`, `tryTake`) accept an optional second parameter for advanced use cases:
+
+```typescript
+yield* myEffect.pipe(sem.withPermits(1, { identifier: "my-custom-id" }));
+```
+
+| Option              | Type      | Default              | Description                                      |
+| ------------------- | --------- | -------------------- | ------------------------------------------------ |
+| `identifier`        | `string`  | `crypto.randomUUID()` | Unique ID for this permit holder                 |
+| `acquiredExternally`| `boolean` | `false`              | Assume permits already held, use refresh to verify |
+
+#### Custom Identifiers
+
+By default, a random UUID is generated for each acquire. Override this for:
+- **Debugging/observability**: Use meaningful identifiers to trace lock holders
+- **Cross-process handoff**: Share identifiers between processes
+
+```typescript
+// Custom identifier for debugging
+yield* myEffect.pipe(sem.withPermits(1, { identifier: "worker-1-job-123" }));
+```
+
+⚠️ **Warning**: Identifiers must be unique across concurrent holders. Using the same identifier from different processes will cause them to be treated as the same holder.
+
+#### Resuming After Crash (`acquiredExternally`)
+
+Use `acquiredExternally: true` to resume ownership of permits that were acquired previously but not properly released (e.g., after a process crash). This uses `refresh` instead of `acquire` to verify ownership.
+
+```typescript
+// Store identifier persistently before doing work
+const identifier = crypto.randomUUID();
+yield* saveToDatabase({ jobId, lockIdentifier: identifier });
+
+yield* Effect.gen(function* () {
+  yield* doWork();
+  yield* deleteFromDatabase(jobId);
+}).pipe(sem.withPermits(1, { identifier }));
+
+// === Later, after crash recovery ===
+const { lockIdentifier } = yield* loadFromDatabase(jobId);
+
+// Check if we still hold the lock (TTL hasn't expired)
+const result = yield* Effect.gen(function* () {
+  yield* resumeWork();
+  yield* deleteFromDatabase(jobId);
+}).pipe(
+  sem.withPermitsIfAvailable(1, { 
+    identifier: lockIdentifier, 
+    acquiredExternally: true 
+  })
+);
+
+if (Option.isNone(result)) {
+  // Lock expired, need to re-acquire normally
+  yield* restartWork().pipe(sem.withPermits(1));
+}
+```
+
+This is useful for:
+- **Crash recovery**: Resume work if you crashed while holding permits
+- **Process restart**: Check if your previous lock is still valid
+
+⚠️ **Unsafe**: If the identifier is wrong or the lock expired, `tryTake`/`withPermitsIfAvailable` return `None`, while `take`/`withPermits` keep retrying forever (waiting for permits that will never come).
+
 #### `currentCount` — Check held permits
 
 ```typescript

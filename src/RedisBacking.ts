@@ -155,7 +155,7 @@ return redis.call('zcard', key)
  */
 export const layer = (
   redis: Redis,
-  keyPrefix = "dsem:"
+  keyPrefix = "semaphore:"
 ): Layer.Layer<DistributedSemaphoreBacking> => {
   const prefixKey = (key: string) => `${keyPrefix}${key}`;
 

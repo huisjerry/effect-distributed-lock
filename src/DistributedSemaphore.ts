@@ -40,9 +40,9 @@ export interface DistributedSemaphoreConfig {
 
   /**
    * How often to poll when waiting to acquire permits.
-   * @default 100ms
+   * @default Schedule.spaced(Duration.millis(100))
    */
-  readonly acquireRetryInterval?: Duration.DurationInput;
+  readonly acquireRetryPolicy?: Schedule.Schedule<void>;
 
   /**
    * Retry policy when a backing failure occurs.
@@ -50,16 +50,58 @@ export interface DistributedSemaphoreConfig {
    * - Trying to acquire permits
    * - Refreshing the TTL
    * - Releasing permits
+   * @default Schedule.recurs(3)
    */
   readonly backingFailureRetryPolicy?: Schedule.Schedule<void>;
 }
 
 const DEFAULT_LIMIT = 1;
 const DEFAULT_TTL = Duration.seconds(30);
-const DEFAULT_ACQUIRE_RETRY_INTERVAL = Duration.millis(100);
-const DEFAULT_FAILURE_RETRY_POLICY = Schedule.spaced(
-  DEFAULT_ACQUIRE_RETRY_INTERVAL
-).pipe(Schedule.asVoid);
+const DEFAULT_ACQUIRE_RETRY_POLICY = Schedule.spaced(Duration.millis(100)).pipe(
+  Schedule.asVoid
+);
+const DEFAULT_FAILURE_RETRY_POLICY = Schedule.recurs(3).pipe(Schedule.asVoid);
+
+// =============================================================================
+// Acquire Options
+// =============================================================================
+
+/**
+ * Options for acquire operations (take, tryTake, withPermits, etc.)
+ */
+export interface AcquireOptions {
+  /**
+   * Unique identifier for this permit holder.
+   *
+   * By default, a random UUID is generated per-acquire. Override this if you need:
+   * - Predictable identifiers for debugging/observability
+   * - Cross-process lock handoff (acquire in one process, release in another)
+   *
+   * ⚠️ **Warning**: Must be unique across concurrent holders, otherwise locks with the same
+   * identifier may be treated as the same holder.
+   *
+   * @default crypto.randomUUID()
+   */
+  readonly identifier?: string;
+
+  /**
+   * If true, assumes the permits were already acquired externally with the given identifier.
+   * Instead of acquiring, uses refresh to verify ownership.
+   *
+   * **Requires `identifier` to be provided.**
+   *
+   * This is useful for cross-process lock handoff:
+   * 1. Process A acquires permits with a known identifier
+   * 2. Process A passes the identifier to Process B (via message queue, etc.)
+   * 3. Process B calls take/withPermits with `{ identifier, acquiredExternally: true }`
+   * 4. Process B now owns the permits (refreshing and releasing)
+   *
+   * ⚠️ **Unsafe**: If the identifier is wrong or the lock expired, this will fail immediately.
+   *
+   * @default false
+   */
+  readonly acquiredExternally?: boolean;
+}
 
 // =============================================================================
 // Distributed Semaphore Interface
@@ -107,7 +149,8 @@ export interface DistributedSemaphore {
    * The permit TTL is refreshed automatically while the effect runs.
    */
   readonly withPermits: (
-    permits: number
+    permits: number,
+    options?: AcquireOptions
   ) => <A, E, R>(
     effect: Effect.Effect<A, E, R>
   ) => Effect.Effect<A, E | LockLostError | SemaphoreBackingError, R>;
@@ -118,7 +161,8 @@ export interface DistributedSemaphore {
    * None if permits were not available.
    */
   readonly withPermitsIfAvailable: (
-    permits: number
+    permits: number,
+    options?: AcquireOptions
   ) => <A, E, R>(
     effect: Effect.Effect<A, E, R>
   ) => Effect.Effect<
@@ -136,7 +180,8 @@ export interface DistributedSemaphore {
    * When the scope closes, the fiber is interrupted and permits are released.
    */
   readonly take: (
-    permits: number
+    permits: number,
+    options?: AcquireOptions
   ) => Effect.Effect<
     Fiber.Fiber<never, LockLostError | SemaphoreBackingError>,
     LockLostError | SemaphoreBackingError,
@@ -152,7 +197,8 @@ export interface DistributedSemaphore {
    * When the scope closes, the fiber is interrupted and permits are released.
    */
   readonly tryTake: (
-    permits: number
+    permits: number,
+    options?: AcquireOptions
   ) => Effect.Effect<
     Option.Option<Fiber.Fiber<never, LockLostError | SemaphoreBackingError>>,
     LockLostError | SemaphoreBackingError,
@@ -174,7 +220,7 @@ type FullyResolvedConfig = {
   limit: number;
   ttl: Duration.Duration;
   refreshInterval: Duration.Duration;
-  acquireRetryInterval: Duration.Duration;
+  acquireRetryPolicy: Schedule.Schedule<void>;
   backingFailureRetryPolicy: Schedule.Schedule<void>;
 };
 
@@ -186,9 +232,9 @@ function fullyResolveConfig(
   const refreshInterval = config.refreshInterval
     ? Duration.decode(config.refreshInterval)
     : Duration.millis(Duration.toMillis(ttl) / 3);
-  const acquireRetryInterval = config.acquireRetryInterval
-    ? Duration.decode(config.acquireRetryInterval)
-    : DEFAULT_ACQUIRE_RETRY_INTERVAL;
+  const acquireRetryPolicy = config.acquireRetryPolicy
+    ? config.acquireRetryPolicy
+    : DEFAULT_ACQUIRE_RETRY_POLICY;
   const backingFailureRetryPolicy = config.backingFailureRetryPolicy
     ? config.backingFailureRetryPolicy
     : DEFAULT_FAILURE_RETRY_POLICY;
@@ -197,7 +243,7 @@ function fullyResolveConfig(
     limit,
     ttl,
     refreshInterval,
-    acquireRetryInterval,
+    acquireRetryPolicy,
     backingFailureRetryPolicy,
   };
 }
@@ -228,15 +274,12 @@ export const make = (
   Effect.gen(function* () {
     const backing = yield* DistributedSemaphoreBacking;
 
-    // Generate unique holder ID for this instance
-    const holderId = crypto.randomUUID();
-
     // Resolve config with defaults
     const {
       limit,
       ttl,
       refreshInterval,
-      acquireRetryInterval,
+      acquireRetryPolicy,
       backingFailureRetryPolicy,
     } = fullyResolveConfig(config);
 
@@ -253,12 +296,13 @@ export const make = (
     // Keep the permits alive by refreshing TTL periodically.
     // This effect runs forever until interrupted (when scope closes).
     const keepAlive = (
+      identifier: string,
       permits: number
     ): Effect.Effect<never, SemaphoreBackingError | LockLostError, never> =>
       Effect.repeat(
         Effect.gen(function* () {
           const refreshed = yield* backing
-            .refresh(key, holderId, ttl, limit, permits)
+            .refresh(key, identifier, ttl, limit, permits)
             .pipe(withBackingErrorRetry);
 
           if (!refreshed) {
@@ -276,27 +320,40 @@ export const make = (
 
     // Try to acquire permits immediately, returns Option
     const tryTake = (
-      permits: number
+      permits: number,
+      options?: AcquireOptions
     ): Effect.Effect<
       Option.Option<Fiber.Fiber<never, LockLostError | SemaphoreBackingError>>,
       SemaphoreBackingError,
       Scope.Scope
     > =>
       Effect.gen(function* () {
-        const acquired = yield* backing
-          .tryAcquire(key, holderId, ttl, limit, permits)
-          .pipe(withBackingErrorRetry);
+        // Generate identifier per-acquire if not provided
+        const identifier = options?.identifier ?? crypto.randomUUID();
+        const acquiredExternally = options?.acquiredExternally ?? false;
+
+        // If acquiredExternally, use refresh to verify ownership instead of acquire
+        const acquired = acquiredExternally
+          ? yield* backing
+              .refresh(key, identifier, ttl, limit, permits)
+              .pipe(withBackingErrorRetry)
+          : yield* backing
+              .tryAcquire(key, identifier, ttl, limit, permits)
+              .pipe(withBackingErrorRetry);
+
         if (!acquired) {
           return Option.none();
         }
 
         // Start keepalive fiber, tied to this scope
-        const keepAliveFiber = yield* Effect.forkScoped(keepAlive(permits));
+        const keepAliveFiber = yield* Effect.forkScoped(
+          keepAlive(identifier, permits)
+        );
 
         // Add finalizer to release permits when scope closes
         yield* Effect.addFinalizer(() =>
           backing
-            .release(key, holderId, permits)
+            .release(key, identifier, permits)
             .pipe(withBackingErrorRetry, Effect.ignore)
         );
 
@@ -305,14 +362,21 @@ export const make = (
 
     // Acquire permits with retry, returns fiber when acquired
     const take = (
-      permits: number
+      permits: number,
+      options?: AcquireOptions
     ): Effect.Effect<
       Fiber.Fiber<never, LockLostError | SemaphoreBackingError>,
       SemaphoreBackingError,
       Scope.Scope
     > =>
       Effect.gen(function* () {
-        const maybeAcquired = yield* tryTake(permits);
+        // Generate identifier once for all retry attempts (outside the retry loop)
+        const identifier = options?.identifier ?? crypto.randomUUID();
+        const resolvedOptions: AcquireOptions = {
+          identifier,
+          acquiredExternally: options?.acquiredExternally,
+        };
+        const maybeAcquired = yield* tryTake(permits, resolvedOptions);
         if (Option.isNone(maybeAcquired)) {
           return yield* new NotYetAcquiredError();
         }
@@ -320,7 +384,7 @@ export const make = (
       }).pipe(
         Effect.retry({
           while: (e) => e._tag === "NotYetAcquiredError",
-          schedule: Schedule.spaced(acquireRetryInterval),
+          schedule: acquireRetryPolicy,
         }),
         Effect.catchTag("NotYetAcquiredError", () =>
           Effect.dieMessage(
@@ -332,13 +396,13 @@ export const make = (
 
     // Convenience: acquire permits, run effect, release when done
     const withPermits =
-      (permits: number) =>
+      (permits: number, options?: AcquireOptions) =>
       <A, E, R>(
         effect: Effect.Effect<A, E, R>
       ): Effect.Effect<A, E | LockLostError | SemaphoreBackingError, R> =>
         Effect.scoped(
           Effect.gen(function* () {
-            const keepAliveFiber = yield* take(permits);
+            const keepAliveFiber = yield* take(permits, options);
 
             return yield* Effect.raceFirst(effect, Fiber.join(keepAliveFiber));
           })
@@ -346,7 +410,7 @@ export const make = (
 
     // Convenience: try to acquire permits, run effect if successful
     const withPermitsIfAvailable =
-      (permits: number) =>
+      (permits: number, options?: AcquireOptions) =>
       <A, E, R>(
         effect: Effect.Effect<A, E, R>
       ): Effect.Effect<
@@ -356,7 +420,7 @@ export const make = (
       > =>
         Effect.scoped(
           Effect.gen(function* () {
-            const maybeAcquired = yield* tryTake(permits);
+            const maybeAcquired = yield* tryTake(permits, options);
             if (Option.isNone(maybeAcquired)) {
               return Option.none();
             }
