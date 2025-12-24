@@ -1,4 +1,4 @@
-import { Duration, Effect, Layer } from "effect";
+import { Duration, Effect, Layer, Schedule, Stream } from "effect";
 import { Redis } from "ioredis";
 import {
   DistributedSemaphoreBacking,
@@ -54,26 +54,37 @@ end
 /**
  * Lua script for atomic release.
  *
- * Removes all permits held by this holder.
+ * Removes all permits held by this holder and optionally publishes a notification.
  *
  * Arguments:
  * - KEYS[1]: the semaphore key
+ * - KEYS[2]: the release notification channel
  * - ARGV[1]: permits to release
  * - ARGV[2]: holderId
+ * - ARGV[3]: shouldPublish (1 = publish, 0 = don't publish)
  *
  * Returns the number of permits released.
  */
 const RELEASE_SCRIPT = `
 local key = KEYS[1]
+local channel = KEYS[2]
 local permits = tonumber(ARGV[1])
 local holderId = ARGV[2]
+local shouldPublish = tonumber(ARGV[3]) == 1
 local args = {}
 
 for i = 0, permits - 1 do
   table.insert(args, holderId .. '_' .. i)
 end
 
-return redis.call('zrem', key, unpack(args))
+local released = redis.call('zrem', key, unpack(args))
+
+-- Notify waiters that permits may be available
+if released > 0 and shouldPublish then
+  redis.call('publish', channel, released)
+end
+
+return released
 `;
 
 /**
@@ -142,6 +153,33 @@ redis.call('zremrangebyscore', key, '-inf', expiredTimestamp)
 return redis.call('zcard', key)
 `;
 
+export interface RedisBackingOptions {
+  /**
+   * Prefix for all keys in Redis.
+   * @default "semaphore:"
+   */
+  readonly keyPrefix?: string;
+
+  /**
+   * Enable push-based acquisition using Redis pub/sub.
+   *
+   * When enabled, waiters subscribe to a channel and get notified immediately
+   * when permits are released, instead of polling. This reduces latency and
+   * load on Redis.
+   *
+   * Requires an additional Redis connection per waiting semaphore.
+   *
+   * @default true
+   */
+  readonly pushBasedAcquireEnabled?: boolean;
+
+  /**
+   * How often to retry the stream of notifications when permits are released.
+   * @default Schedule.forever
+   */
+  readonly pushStreamRetrySchedule?: Schedule.Schedule<void>;
+}
+
 /**
  * Create a Redis-backed distributed semaphore backing layer.
  *
@@ -151,13 +189,18 @@ return redis.call('zcard', key)
  * For multi-instance Redis, consider implementing a Redlock-based backing.
  *
  * @param redis - An ioredis client instance (single instance, not cluster)
- * @param keyPrefix - Optional prefix for all keys (default: "dsem:")
+ * @param options - Configuration options
  */
 export const layer = (
   redis: Redis,
-  keyPrefix = "semaphore:"
+  options: RedisBackingOptions = {}
 ): Layer.Layer<DistributedSemaphoreBacking> => {
+  const keyPrefix = options.keyPrefix ?? "semaphore:";
+  const pushBasedAcquireEnabled = options.pushBasedAcquireEnabled ?? true;
+  const pushStreamRetrySchedule =
+    options.pushStreamRetrySchedule ?? Schedule.forever.pipe(Schedule.asVoid);
   const prefixKey = (key: string) => `${keyPrefix}${key}`;
+  const releaseChannel = (key: string) => `${keyPrefix}${key}:released`;
 
   const tryAcquire = (
     key: string,
@@ -194,10 +237,12 @@ export const layer = (
       try: async () => {
         const result = await redis.eval(
           RELEASE_SCRIPT,
-          1,
+          2,
           prefixKey(key),
+          releaseChannel(key),
           permits.toString(),
-          holderId
+          holderId,
+          pushBasedAcquireEnabled ? "1" : "0"
         );
         return result as number;
       },
@@ -251,10 +296,55 @@ export const layer = (
         new SemaphoreBackingError({ operation: "getCount", cause }),
     });
 
+  // Stream that emits when permits are released on a given key.
+  // Uses Redis pub/sub with a dedicated subscriber connection.
+  const onPermitsReleased = (key: string): Stream.Stream<void> =>
+    Stream.asyncPush<void, SemaphoreBackingError>((emit) => {
+      const channel = releaseChannel(key);
+
+      return Effect.acquireRelease(
+        Effect.gen(function* () {
+          // Create a dedicated subscriber connection
+          const subscriber = redis.duplicate();
+
+          // Set up message handler before subscribing
+          const messageHandler = (ch: string, _message: string) => {
+            if (ch === channel) {
+              emit.single(void 0);
+            }
+          };
+          subscriber.on("message", messageHandler);
+
+          // Subscribe to the channel
+          yield* Effect.tryPromise({
+            try: () => subscriber.subscribe(channel),
+            catch: (cause) =>
+              new SemaphoreBackingError({ operation: "subscribe", cause }),
+          });
+
+          return { subscriber, messageHandler };
+        }),
+        ({ subscriber, messageHandler }) =>
+          Effect.sync(() => {
+            subscriber.off("message", messageHandler);
+            subscriber.unsubscribe(channel);
+            subscriber.disconnect();
+          })
+      );
+    }).pipe(
+      Stream.retry(pushStreamRetrySchedule),
+      Stream.catchTag("SemaphoreBackingError", () =>
+        Stream.dieMessage(
+          "Invariant violated: `onPermitsReleased` should never error because it should be retried forever"
+        )
+      )
+    );
+
   return Layer.succeed(DistributedSemaphoreBacking, {
     tryAcquire,
     release,
     refresh,
     getCount,
+    onPermitsReleased: pushBasedAcquireEnabled ? onPermitsReleased : undefined,
   });
 };

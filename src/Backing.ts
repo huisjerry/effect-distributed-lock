@@ -1,4 +1,4 @@
-import { Context, Data, Duration, Effect } from "effect";
+import { Context, Data, Duration, Effect, Stream } from "effect";
 
 // =============================================================================
 // Errors
@@ -24,22 +24,12 @@ export class SemaphoreBackingError extends Data.TaggedError(
 
 /**
  * Low-level backing store interface for distributed semaphore operations.
- * Implementations handle the actual storage (Redis, etc.)
- *
- * The semaphore uses a sorted set model where:
- * - Each permit holder is stored with their acquisition timestamp as the score
- * - Expired entries are cleaned up automatically
- * - Multiple permits can be acquired atomically
  */
 export interface DistributedSemaphoreBacking {
   /**
    * Try to acquire `permits` from a semaphore with the given `limit`.
-   * Returns true if acquired, false if not enough permits available.
    *
-   * The implementation should:
-   * 1. Clean up expired entries (based on TTL)
-   * 2. Check if there's room: currentCount + permits <= limit
-   * 3. If so, add the permits with current timestamp
+   * @returns `true` if acquired, `false` if not enough permits available.
    */
   readonly tryAcquire: (
     key: string,
@@ -50,8 +40,9 @@ export interface DistributedSemaphoreBacking {
   ) => Effect.Effect<boolean, SemaphoreBackingError>;
 
   /**
-   * Release `permits` held by this holder.
-   * Returns the number of permits actually released.
+   * Release `permits` held by the given holder.
+   *
+   * @returns The number of permits actually released.
    */
   readonly release: (
     key: string,
@@ -60,8 +51,9 @@ export interface DistributedSemaphoreBacking {
   ) => Effect.Effect<number, SemaphoreBackingError>;
 
   /**
-   * Refresh the TTL on permits we hold.
-   * Returns true if refreshed, false if permits were lost.
+   * Refresh the TTL on permits held by this holder.
+   *
+   * @returns `true` if refreshed, `false` if permits were lost (e.g., expired).
    */
   readonly refresh: (
     key: string,
@@ -73,12 +65,24 @@ export interface DistributedSemaphoreBacking {
 
   /**
    * Get the number of permits currently held (in use).
-   * Available permits = limit - getCount().
    */
   readonly getCount: (
     key: string,
     ttl: Duration.Duration
   ) => Effect.Effect<number, SemaphoreBackingError>;
+
+  /**
+   * Optional: Stream of notifications when permits MAY be available.
+   *
+   * If provided, the semaphore layer uses this for efficient waiting instead
+   * of polling. The stream emits a signal whenever permits are released.
+   *
+   * Notes:
+   * - Multiple waiters may race for permits after a notification
+   * - The semaphore still calls `tryAcquire` after each notification
+   * - Implementations should handle reconnection internally (hence why the stream does not have an error type)
+   */
+  readonly onPermitsReleased?: (key: string) => Stream.Stream<void>;
 }
 
 export const DistributedSemaphoreBacking =

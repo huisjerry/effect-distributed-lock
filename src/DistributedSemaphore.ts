@@ -3,9 +3,11 @@ import {
   Duration,
   Effect,
   Fiber,
+  Function,
   Option,
   Schedule,
   Scope,
+  Stream,
 } from "effect";
 import {
   DistributedSemaphoreBacking,
@@ -376,23 +378,75 @@ export const make = (
           identifier,
           acquiredExternally: options?.acquiredExternally,
         };
-        const maybeAcquired = yield* tryTake(permits, resolvedOptions);
-        if (Option.isNone(maybeAcquired)) {
-          return yield* new NotYetAcquiredError();
-        }
-        return maybeAcquired.value;
-      }).pipe(
-        Effect.retry({
-          while: (e) => e._tag === "NotYetAcquiredError",
-          schedule: acquireRetryPolicy,
-        }),
-        Effect.catchTag("NotYetAcquiredError", () =>
-          Effect.dieMessage(
-            "Invariant violated: `take` should never return `NotYetAcquiredError` " +
-              "since it should be caught by the retry which should retry forever until permits are acquired"
+
+        // We use a semaphore to ensure that only one acquire attempt is made at a time.
+        // With `withPermitsIfAvailable`, if both the poll-based and push-based attempts "trigger" at the same time,
+        // one will succeed and the other will simple be a no-op.
+        const acquireSemaphore = yield* Effect.makeSemaphore(1);
+
+        const pushBasedAcquireEnabled = backing.onPermitsReleased
+          ? true
+          : false;
+
+        const pollBasedAcquire = Effect.gen(function* () {
+          const maybeAcquired = yield* tryTake(permits, resolvedOptions).pipe(
+            // only apply the semaphore if push-based acquire is supported
+            pushBasedAcquireEnabled
+              ? Function.compose(
+                  acquireSemaphore.withPermitsIfAvailable(1),
+                  Effect.map(Option.flatten)
+                )
+              : Function.identity
+          );
+          if (Option.isNone(maybeAcquired)) {
+            return yield* new NotYetAcquiredError();
+          }
+          return maybeAcquired.value;
+        }).pipe(
+          Effect.retry({
+            while: (e) => e._tag === "NotYetAcquiredError",
+            schedule: acquireRetryPolicy,
+          }),
+          Effect.catchTag("NotYetAcquiredError", () =>
+            Effect.dieMessage(
+              "Invariant violated: `take` should never return `NotYetAcquiredError` " +
+                "since it should be caught by the retry which should retry forever until permits are acquired"
+            )
           )
-        )
-      );
+        );
+
+        if (!pushBasedAcquireEnabled) {
+          return yield* pollBasedAcquire;
+        }
+
+        // Push-based acquire: run both poll-based and push-based acquire in parallel, and return the first one to complete
+        const pushBasedAcquire = backing.onPermitsReleased
+          ? Effect.gen(function* () {
+              if (!backing.onPermitsReleased) {
+                // SAFETY: We know that onPermitsReleased is provided because we checked it above
+                return yield* Effect.dieMessage(
+                  "Invariant violated: `onPermitsReleased` is not provided"
+                );
+              }
+              return yield* backing.onPermitsReleased(key).pipe(
+                Stream.runFoldWhileEffect(
+                  Option.none<
+                    Fiber.Fiber<never, LockLostError | SemaphoreBackingError>
+                  >(),
+                  Option.isNone, // keep folding while we haven't acquired
+                  () =>
+                    tryTake(permits, resolvedOptions).pipe(
+                      acquireSemaphore.withPermitsIfAvailable(1),
+                      Effect.map(Option.flatten)
+                    )
+                ),
+                Effect.map(Option.getOrThrow)
+              );
+            })
+          : Effect.never;
+
+        return yield* Effect.race(pollBasedAcquire, pushBasedAcquire);
+      });
 
     // Convenience: acquire permits, run effect, release when done
     const withPermits =

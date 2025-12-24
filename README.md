@@ -12,6 +12,7 @@ It's like the built in `Effect.Semaphore`, but asynchronously distributed across
 - **Scope-based resource management** — permits are automatically released when the scope closes
 - **Automatic TTL refresh** — keeps permits alive while held, prevents deadlocks if holder crashes
 - **Pluggable backends** — ships with Redis (single-instance), easy to implement others
+- **Push-based waiting** — uses pub/sub for efficient notification when permits become available (optional, with polling fallback)
 - **Configurable retry policies** — control polling interval, TTL, and backing failure retry behavior
 - **Type-safe errors** — tagged errors for precise error handling
 
@@ -34,7 +35,7 @@ import Redis from "ioredis";
 import { DistributedSemaphore, RedisBacking } from "effect-distributed-lock";
 
 const redis = new Redis(process.env.REDIS_URL);
-const RedisLayer = RedisBacking.layer(redis);
+const RedisLayer = RedisBacking.layer(redis, { keyPrefix: "my-app:" });
 
 const program = Effect.gen(function* () {
   // Create a semaphore that allows 5 concurrent operations
@@ -216,7 +217,37 @@ import { RedisBacking } from "effect-distributed-lock";
 
 // Single Redis instance
 const redis = new Redis("redis://localhost:6379");
-const RedisLayer = RedisBacking.layer(redis, "my-prefix:");
+const RedisLayer = RedisBacking.layer(redis, {
+  keyPrefix: "my-prefix:",
+  pushBasedAcquireEnabled: true, // default: true
+});
+```
+
+### Configuration Options
+
+| Option                     | Type             | Default            | Description                                          |
+| -------------------------- | ---------------- | ------------------ | ---------------------------------------------------- |
+| `keyPrefix`                | `string`         | `"semaphore:"`     | Prefix for all Redis keys                            |
+| `pushBasedAcquireEnabled`  | `boolean`        | `true`             | Use pub/sub for efficient waiting (see below)        |
+| `pushStreamRetrySchedule`  | `Schedule<void>` | `Schedule.forever` | Retry schedule for pub/sub stream errors             |
+
+### Push-Based Acquisition
+
+By default, the Redis backing uses pub/sub to notify waiters when permits become available. This reduces latency and load on Redis compared to pure polling.
+
+When permits are released, a message is published to a channel. Waiters subscribe to this channel and immediately attempt to acquire when notified. The semaphore still falls back to polling as a safety net.
+
+**Trade-offs:**
+- ✅ Lower latency — waiters are notified immediately
+- ✅ Reduced Redis load — fewer polling requests
+- ⚠️ Extra connection — each waiting semaphore uses a subscriber connection
+
+To disable and use polling only:
+
+```typescript
+const RedisLayer = RedisBacking.layer(redis, {
+  pushBasedAcquireEnabled: false,
+});
 ```
 
 For multi-instance Redis deployments requiring Redlock, you'll need to implement a custom backing.
@@ -226,7 +257,7 @@ For multi-instance Redis deployments requiring Redlock, you'll need to implement
 Implement the `DistributedSemaphoreBacking` interface to use a different store:
 
 ```typescript
-import { Duration, Effect, Layer, Option } from "effect";
+import { Duration, Effect, Layer, Stream } from "effect";
 import { Backing, DistributedSemaphoreBacking } from "effect-distributed-lock";
 
 const MyCustomBacking = Layer.succeed(DistributedSemaphoreBacking, {
@@ -241,16 +272,23 @@ const MyCustomBacking = Layer.succeed(DistributedSemaphoreBacking, {
   
   getCount: (key, ttl) => 
     Effect.succeed(0), // Return number of permits currently held
+
+  // Optional: Enable push-based waiting
+  onPermitsReleased: (key) => 
+    Stream.never, // Stream that emits when permits MAY be available
 });
 ```
+
+The `onPermitsReleased` method is optional. If provided, the semaphore will use it for efficient push-based waiting instead of pure polling. The stream should emit whenever permits are released on the given key. Multiple waiters may race for permits after a notification, so `tryAcquire` is still called after each notification.
 
 ## How It Works
 
 1. **Acquire**: Atomically adds permits to a sorted set if there's room (Redis: Lua script with `ZADD`)
 2. **Keepalive**: A background fiber refreshes the TTL periodically by updating timestamps
-3. **Release**: Atomically removes permits from the sorted set (Lua script with `ZREM`)
-4. **Expiration**: Expired entries (based on TTL) are cleaned up on each operation
-5. **Crash safety**: If the holder crashes, permits expire and become available
+3. **Release**: Atomically removes permits and publishes notification to waiters (Lua script with `ZREM` + `PUBLISH`)
+4. **Waiting**: Combines polling with pub/sub notifications — waiters are notified immediately when permits are released
+5. **Expiration**: Expired entries (based on TTL) are cleaned up on each operation
+6. **Crash safety**: If the holder crashes, permits expire and become available
 
 ## License
 

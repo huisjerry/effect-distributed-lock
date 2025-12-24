@@ -12,7 +12,9 @@ import { DistributedSemaphore, RedisBacking } from "../src/index.ts";
 const redis = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379");
 
 // Create the Redis backing layer
-const RedisLayer = RedisBacking.layer(redis, "example:");
+const RedisLayer = RedisBacking.layer(redis, {
+  keyPrefix: "example:",
+});
 
 // Example 1: Using withPermits for a critical section (mutex behavior)
 const example1 = Effect.gen(function* () {
