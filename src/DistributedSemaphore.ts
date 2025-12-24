@@ -13,7 +13,7 @@ import {
   DistributedSemaphoreBacking,
   SemaphoreBackingError,
 } from "./Backing.js";
-import { LockLostError, NotYetAcquiredError } from "./Errors.js";
+import { LockLostError, LockNotAcquiredError } from "./Errors.js";
 
 // =============================================================================
 // Semaphore Configuration
@@ -153,7 +153,7 @@ export interface DistributedSemaphore {
     options?: AcquireOptions
   ) => <A, E, R>(
     effect: Effect.Effect<A, E, R>
-  ) => Effect.Effect<A, E | LockLostError | SemaphoreBackingError, R>;
+  ) => Effect.Effect<A, E | LockLostError | SemaphoreBackingError | LockNotAcquiredError, R>;
 
   /**
    * Run an effect only if the specified permits are immediately available.
@@ -184,7 +184,7 @@ export interface DistributedSemaphore {
     options?: AcquireOptions
   ) => Effect.Effect<
     Fiber.Fiber<never, LockLostError | SemaphoreBackingError>,
-    LockLostError | SemaphoreBackingError,
+    LockLostError | SemaphoreBackingError | LockNotAcquiredError,
     Scope.Scope
   >;
 
@@ -366,7 +366,7 @@ export const make = (
       options?: AcquireOptions
     ): Effect.Effect<
       Fiber.Fiber<never, LockLostError | SemaphoreBackingError>,
-      SemaphoreBackingError,
+      SemaphoreBackingError | LockNotAcquiredError,
       Scope.Scope
     > =>
       Effect.gen(function* () {
@@ -397,20 +397,14 @@ export const make = (
               : Function.identity
           );
           if (Option.isNone(maybeAcquired)) {
-            return yield* new NotYetAcquiredError();
+            return yield* new LockNotAcquiredError({ key });
           }
           return maybeAcquired.value;
         }).pipe(
           Effect.retry({
-            while: (e) => e._tag === "NotYetAcquiredError",
+            while: (e) => e._tag === "LockNotAcquiredError",
             schedule: acquireRetryPolicy,
-          }),
-          Effect.catchTag("NotYetAcquiredError", () =>
-            Effect.dieMessage(
-              "Invariant violated: `take` should never return `NotYetAcquiredError` " +
-                "since it should be caught by the retry which should retry forever until permits are acquired"
-            )
-          )
+          })
         );
 
         if (!pushBasedAcquireEnabled) {
@@ -452,7 +446,7 @@ export const make = (
       (permits: number, options?: AcquireOptions) =>
       <A, E, R>(
         effect: Effect.Effect<A, E, R>
-      ): Effect.Effect<A, E | LockLostError | SemaphoreBackingError, R> =>
+      ): Effect.Effect<A, E | LockLostError | SemaphoreBackingError | LockNotAcquiredError, R> =>
         Effect.scoped(
           Effect.gen(function* () {
             const keepAliveFiber = yield* take(permits, options);

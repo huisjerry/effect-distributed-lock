@@ -12,9 +12,14 @@ export class LockLostError extends Data.TaggedError("LockLostError")<{
 }
 
 /**
- * Internal error: permits not yet acquired (used for retry logic)
- * @internal
+ * The lock failed to be acquired. This occurs when the lock is not aquired within the provided schedule.
  */
-export class NotYetAcquiredError extends Data.TaggedError(
-  "NotYetAcquiredError"
-)<{}> {}
+export class LockNotAcquiredError extends Data.TaggedError(
+  "LockNotAcquiredError"
+)<{
+  readonly key: string;
+}> {
+  get message() {
+    return `Lock for "${this.key}" was not acquired`;
+  }
+}
