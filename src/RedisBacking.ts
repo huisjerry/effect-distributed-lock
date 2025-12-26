@@ -333,10 +333,10 @@ export const layer = (
       );
     }).pipe(
       Stream.retry(pushStreamRetrySchedule),
+      // If we continue to error, and the schedule has completed,
+      // just return a stream that will never emit
       Stream.catchTag("SemaphoreBackingError", () =>
-        Stream.dieMessage(
-          "Invariant violated: `onPermitsReleased` should never error because it should be retried forever"
-        )
+        Stream.never
       )
     );
 
