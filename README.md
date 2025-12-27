@@ -111,7 +111,11 @@ yield* Effect.scoped(
 );
 ```
 
-Both `take` and `tryTake` return the keepalive fiber that refreshes the permit TTL. Errors from the keepalive (losing permits or backing store failure) are propagated through the fiber.
+Both `take` and `tryTake` return the keepalive fiber that refreshes the permit TTL.
+
+⚠️ **CRITICAL**: Errors from the keepalive fiber (losing permits or backing store failure) mean **the lock is effectively lost**. You **must** join this fiber at some point in your program to detect these failures. If the keepalive fiber errors and you don't join it, your program will continue running without holding the lock, potentially leading to race conditions or data corruption.
+
+**It is highly recommended to use `withPermits` or `withPermitsIfAvailable` instead**, which automatically manage the keepalive fiber lifecycle and propagate errors for you. Only use `take`/`tryTake` if you need explicit scope control and understand the responsibility of managing the keepalive fiber.
 
 ### Acquire Options
 
